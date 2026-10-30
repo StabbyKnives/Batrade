@@ -1,0 +1,21 @@
+[project]
+name = "batrade"
+version = "0.1.0"
+description = "Batrade Home-SOC: monitor local de red doméstica (IDS, solo detección)"
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+    "Flask>=3.0",
+    "requests>=2.28",
+    "defusedxml>=0.7",
+    "scapy>=2.5",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.batrade]
+db = "var/batrade.db"

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Panel{% endblock %} · Batrade</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{{ url_for('index') }}">
+    <span class="logo"></span> Batrade <em>Home-SOC</em>
+  </a>
+  <nav class="nav">
+    <a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}on{% endif %}">Panel</a>
+    <a href="{{ url_for('devices') }}" class="{% if request.endpoint in ('devices', 'device_detail') %}on{% endif %}">Dispositivos</a>
+    <a href="{{ url_for('events') }}" class="{% if request.endpoint == 'events' %}on{% endif %}">Alertas</a>
+    <a href="{{ url_for('learning') }}" class="{% if request.endpoint == 'learning' %}on{% endif %}">Línea base</a>
+    <a href="{{ url_for('health_page') }}" class="{% if request.endpoint == 'health_page' %}on{% endif %}">Salud</a>
+  </nav>
+  <div class="pill {{ 'ok' if not health.stale else 'bad' }}">
+    {{ 'sensor vivo' if not health.stale else 'sensor sin latido' }} · {{ mode }}
+  </div>
+</header>
+
+<main>
+  {% if learning and request.endpoint != 'learning' %}
+  <div class="banner">
+    <strong>Modo aprendizaje.</strong> Los equipos nuevos no generan alertas todavía.
+    <a href="{{ url_for('learning') }}">Aprobar la línea base →</a>
+  </div>
+  {% endif %}
+
+  {% for cat, msg in get_flashed_messages(with_categories=true) %}
+    <div class="flash {{ cat }}">{{ msg }}</div>
+  {% endfor %}
+
+  {% block content %}{% endblock %}
+</main>
+
+<footer>
+  Batrade · IDS doméstico · solo metadatos, nunca contenido del tráfico
+</footer>
+</body>
+</html>

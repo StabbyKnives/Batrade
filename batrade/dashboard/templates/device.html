@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}{{ device["alias"] or device["hostname"] or device["mac"] }}{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <a class="back" href="{{ url_for('devices') }}">← Dispositivos</a>
+    <h1>{{ device["alias"] or device["hostname"] or "Equipo sin nombre" }}</h1>
+    <p class="muted mono">{{ device["mac"] }} · {{ device["ip_actual"] or "sin IP" }}
+      {% if is_gateway %}<span class="tag">gateway</span>{% endif %}
+      {% if device["mac_aleatoria"] %}<span class="tag">MAC local/aleatoria</span>{% endif %}
+    </p>
+  </div>
+  <span class="chip trust-{{ device['estado_confianza'] }} big">{{ trust_label[device['estado_confianza']] }}</span>
+</div>
+
+<div class="columns">
+  <section class="card grow">
+    <header class="card-head"><h2>Puertos observados</h2>
+      <span class="muted">{{ ports|length }} puerto(s)</span></header>
+    {% if ports %}
+    <table class="table">
+      <thead><tr><th>Puerto</th><th>Servicio</th><th>Versión</th><th>Estado</th><th>Visto</th></tr></thead>
+      <tbody>
+      {% for p in ports %}
+        <tr>
+          <td class="mono">{{ p["puerto"] }}/{{ p["protocolo"] }}
+            {% if p["riesgoso"] %}<span class="chip warn">riesgoso</span>{% endif %}</td>
+          <td>{{ p["servicio"] or "—" }}</td>
+          <td class="mono small">{{ p["version"] or "—" }}</td>
+          <td>{{ p["estado"] }}</td>
+          <td title="{{ p['last_seen']|ts }}">{{ p["last_seen"]|ago }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">Sin datos de puertos todavía. Lanza un escaneo manual.</p>
+    {% endif %}
+  </section>
+
+  <aside class="card side">
+    <header class="card-head"><h2>Clasificar</h2></header>
+    <form method="post" action="{{ url_for('device_update', device_id=device['id']) }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Alias
+        <input type="text" name="alias" maxlength="64"
+               value="{{ device['alias'] or '' }}" placeholder="Smart TV Sala">
+      </label>
+      <label>Estado
+        <select name="estado">
+          {% for key, label in trust_label.items() %}
+          <option value="{{ key }}" {% if device["estado_confianza"] == key %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="btn" type="submit">Guardar</button>
+    </form>
+
+    <hr>
+    <header class="card-head"><h2>Escaneo manual</h2></header>
+    <form method="post" action="{{ url_for('scan_request') }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="objetivo" value="{{ device['ip_actual'] or '' }}">
+      <input type="hidden" name="back" value="{{ url_for('device_detail', device_id=device['id']) }}">
+      <label>Perfil
+        <select name="perfil">
+          <option value="quick">Rápido (100 puertos TCP)</option>
+          <option value="standard">Estándar (top 1000 + versiones)</option>
+          <option value="vuln">Vulnerabilidades (intrusivo)</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" name="confirm" value="1">
+        Confirmo el escaneo intrusivo con <code>--script vuln</code></label>
+      <button class="btn" type="submit" {% if not device["ip_actual"] %}disabled{% endif %}>Solicitar escaneo</button>
+    </form>
+
+    <hr>
+    <dl class="kv">
+      <dt>Fabricante</dt><dd>{{ device["fabricante"] or "—" }}</dd>
+      <dt>Hostname</dt><dd>{{ device["hostname"] or "—" }}</dd>
+      <dt>Primera vez</dt><dd>{{ device["first_seen"]|ts }}</dd>
+      <dt>Última vez</dt><dd>{{ device["last_seen"]|ts }}</dd>
+      <dt>Último escaneo</dt><dd>{{ device["last_scan_ts"]|ago }}</dd>
+    </dl>
+  </aside>
+</div>
+
+<div class="columns">
+  <section class="card grow">
+    <header class="card-head"><h2>Historial de conexión</h2></header>
+    {% if history %}
+    <table class="table compact">
+      <thead><tr><th>Cuándo</th><th>Evento</th><th>IP</th><th>Detalle</th></tr></thead>
+      <tbody>
+      {% for h in history %}
+        <tr><td title="{{ h['ts']|ts }}">{{ h["ts"]|ago }}</td>
+            <td>{{ h["evento"] }}</td><td class="mono">{{ h["ip"] or "—" }}</td>
+            <td class="muted">{{ h["detalle"] or "" }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty">Sin historial.</p>{% endif %}
+  </section>
+
+  <section class="card grow">
+    <header class="card-head"><h2>Alertas relacionadas</h2></header>
+    {% if events %}
+    <table class="table compact">
+      <thead><tr><th>Severidad</th><th>Evento</th><th>Cuándo</th></tr></thead>
+      <tbody>
+      {% for e in events %}
+        <tr><td><span class="chip {{ e['severidad'] }}">{{ sev_label[e['severidad']] }}</span></td>
+            <td>{{ e["tipo"] }}</td><td title="{{ e['last_ts']|ts }}">{{ e["last_ts"]|ago }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty">Sin alertas para este equipo.</p>{% endif %}
+  </section>
+</div>
+
+{% endblock %}

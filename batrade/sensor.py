@@ -1,0 +1,562 @@
+"""Daemon batrade-sensor: orquesta descubrimiento, detección y notificación.
+
+Un solo proceso, varios hilos, cada uno con su propia conexión SQLite (WAL
+permite lectores concurrentes; el escritor está serializado por busy_timeout).
+
+Modos:
+  live      arp-scan + sniffing pasivo con scapy (requiere CAP_NET_RAW)
+  degraded  sondeo TCP + tabla de vecinos + netlink (esta VM)
+  replay    alimenta el motor desde un .pcap grabado
+  simulate  alimenta el motor con tráfico sintético (demo y tests)
+"""
+from __future__ import annotations
+
+import json
+import logging
+import queue
+import signal
+import threading
+import time
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Iterable
+
+from batrade import db, store
+from batrade.config import Config
+from batrade.detect import scenarios
+from batrade.detect.engine import Engine
+from batrade.detect.observation import ARP, Observation
+from batrade.detect.state import Baseline
+from batrade.inventory import Inventory, status as baseline_status
+from batrade.net import caps as caps_mod
+from batrade.net.discovery import Discovery, DiscoveryError
+from batrade.net.iputil import interface_ipv4, ip_in_cidr, normalize_mac, now_ms
+from batrade.net.neigh import NeighborWatcher
+from batrade.net.nmap_scan import ScanError, run_scan, udp_risky_ports
+from batrade.net.oui import OuiDB
+from batrade.net.verify import interpret, probe_binding
+from batrade.notify import Notifier
+
+log = logging.getLogger("batrade.sensor")
+
+QUICK_RESCAN_MS = 24 * 3600 * 1000
+
+
+@dataclass(slots=True)
+class ScanJob:
+    ip: str
+    profile: str
+    device_id: int | None = None
+    request_id: int | None = None
+
+
+class Sensor:
+    def __init__(self, cfg: Config, mode: str = "auto", *,
+                 scenario: str | None = None, pcap: str | None = None,
+                 speed: float = 5.0, duration: float | None = None):
+        self.cfg = cfg
+        self.caps = caps_mod.probe()
+        self.mode, self.mode_notes = caps_mod.resolve_mode(mode, self.caps)
+        self.scenario = scenario
+        self.pcap = pcap
+        self.speed = max(1.0, float(speed))
+        self.duration = duration
+        self.stop_event = threading.Event()
+        self._local = threading.local()
+        self._lock = threading.RLock()
+        self._pending: set[tuple[str, str]] = set()
+        self.scan_queue: queue.Queue[ScanJob | None] = queue.Queue(maxsize=64)
+        self._threads: list[threading.Thread] = []
+        self.started_ts = now_ms()
+        self.oui = OuiDB.load(cfg.paths.oui_file)
+        self.conn = db.initialize(cfg.paths.db)
+        recovered = db.recover_interrupted(self.conn, now_ms())
+        if any(recovered.values()):
+            log.info("estado recuperado tras reinicio", extra={"fields": recovered})
+        self.engine = Engine(cfg, self._load_baseline())
+        self.discovery = Discovery(cfg, self.caps)
+        self.notifier = Notifier(cfg, lambda: db.connect(cfg.paths.db),
+                                 env=self._env())
+        self._wire_sensor_identity()
+
+    # ------------------------------------------------------------------ setup
+    def _env(self) -> dict[str, str]:
+        import os
+        return dict(os.environ)
+
+    def _load_baseline(self) -> Baseline:
+        b = Baseline()
+        b.gateway_ip = (store.get_meta(self.conn, "gateway_ip")
+                        or self.cfg.network.gateway_ip)
+        b.gateway_mac = store.get_meta(self.conn, "gateway_mac")
+        b.dhcp_server_ip = (store.get_meta(self.conn, "dhcp_server_ip")
+                            or self.cfg.network.dhcp_server_ip)
+        b.exceptions = set(self.cfg.detect.arp_exceptions)
+        b.learning = baseline_status(self.conn)["learning"]
+        return b
+
+    def _wire_sensor_identity(self) -> None:
+        ip = interface_ipv4(self.cfg.network.interface)
+        mac = self._interface_mac(self.cfg.network.interface)
+        self.engine.register_sensor(ip, mac)
+        self.sensor_ip = ip
+        self.sensor_mac = mac
+
+    @staticmethod
+    def _interface_mac(iface: str) -> str | None:
+        try:
+            raw = Path(f"/sys/class/net/{iface}/address").read_text().strip()
+        except OSError:
+            return None
+        return normalize_mac(raw)
+
+    def _conn(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = db.connect(self.cfg.paths.db)
+            self._local.conn = conn
+        return conn
+
+    # ------------------------------------------------------------------- API
+    def start(self) -> None:
+        self._log_startup()
+        store.heartbeat(self.conn, "sensor", now_ms(), json.dumps({
+            "mode": self.mode, "state": "starting",
+        }))
+        self._spawn(self._main_loop, "batrade-main")
+        self._spawn(self.notifier.run, "batrade-notify")
+        if self.mode in ("live", "degraded"):
+            self._spawn(self._sweep_loop, "batrade-sweep")
+            if self.cfg.sensor.neighbor_watch and self.caps.netlink_neigh:
+                watcher = NeighborWatcher(self._on_neighbor, self.cfg.network.interface,
+                                          stop_event=self.stop_event)
+                self._threads.append(watcher)
+                watcher.start()
+            if self.mode == "live":
+                self._spawn(self._sniff_loop, "batrade-sniff")
+            for i in range(self.cfg.scan.max_concurrent if self.cfg.scan.enabled else 0):
+                self._spawn(self._scan_worker, f"batrade-scan-{i}")
+        elif self.mode in ("replay", "simulate"):
+            self._spawn(self._feed_loop, "batrade-feed")
+
+    def run(self) -> None:
+        self.start()
+        try:
+            while not self.stop_event.is_set():
+                self.stop_event.wait(0.5)
+        except KeyboardInterrupt:
+            log.info("interrupción recibida")
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        if self.stop_event.is_set():
+            return
+        self.stop_event.set()
+        self.notifier.stop_event.set()
+        try:
+            self.scan_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        for t in self._threads:
+            t.join(timeout=3.0)
+        try:
+            store.heartbeat(self.conn, "sensor", now_ms(), json.dumps({
+                "mode": self.mode, "state": "stopped"}))
+            self.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("sensor detenido")
+
+    # -------------------------------------------------------------- hilos
+    def _spawn(self, target, name: str) -> None:
+        t = threading.Thread(target=self._guard(target), name=name, daemon=True)
+        self._threads.append(t)
+        t.start()
+
+    def _guard(self, target):
+        def runner():
+            try:
+                target()
+            except Exception:
+                log.exception("hilo %s terminó por excepción", threading.current_thread().name)
+        return runner
+
+    def _main_loop(self) -> None:
+        import sqlite3
+
+        conn = self._conn()
+        last_purge = 0
+        last_prune = 0
+        while not self.stop_event.wait(1.0):
+            ts = now_ms()
+            try:
+                self.engine.set_learning(baseline_status(conn)["learning"])
+                # Solicitudes del dashboard
+                for req in store.claim_scan_requests(conn):
+                    self._enqueue_scan(ScanJob(ip=req["objetivo"], profile=req["perfil"],
+                                               request_id=int(req["id"])), origin="dashboard")
+                if ts - last_prune > 30_000:
+                    self.engine.prune(ts)
+                    last_prune = ts
+                if ts - last_purge > 3600_000:
+                    cutoff = ts - self.cfg.sensor.retention_days * 86400_000
+                    purged = store.purge(conn, cutoff)
+                    last_purge = ts
+                    if any(purged.values()):
+                        log.info("purga de retención", extra={"fields": purged})
+                if ts - self._last_heartbeat() >= self.cfg.sensor.heartbeat_interval * 1000:
+                    self._heartbeat(conn, ts)
+                if self.duration and (ts - self.started_ts) > self.duration * 1000:
+                    log.info("duración alcanzada; deteniendo")
+                    self.stop_event.set()
+            except sqlite3.OperationalError as exc:
+                log.warning("SQLite ocupado en el bucle principal: %s", exc)
+            except Exception:
+                log.exception("error en el bucle principal")
+
+    def _last_heartbeat(self) -> int:
+        return getattr(self, "_hb_ts", 0)
+
+    def _heartbeat(self, conn, ts: int) -> None:
+        self._hb_ts = ts
+        detalle = {
+            "mode": self.mode,
+            "state": "running",
+            "caps": self.caps.summary(),
+            "engine": self.engine.snapshot(),
+            "queue": self.scan_queue.qsize(),
+            "notified": self.notifier.sent,
+            "notify_failed": self.notifier.failed,
+        }
+        store.heartbeat(conn, "sensor", ts, json.dumps(detalle, default=str))
+
+    # ------------------------------------------------- descubrimiento activo
+    def _sweep_loop(self) -> None:
+        conn = self._conn()
+        inv = Inventory(conn, self.cfg, self.oui, learning=baseline_status(conn)["learning"])
+        first = True
+        while not self.stop_event.is_set():
+            ts = now_ms()
+            try:
+                result = self.discovery.sweep()
+                store.record_tool_status(conn, f"sweep:{result.backend}", ts, True)
+                failures = 0
+            except DiscoveryError as exc:
+                failures = store.record_tool_status(conn, "sweep", ts, False, error=str(exc))
+                log.warning("barrido falló (%s/%s): %s", failures,
+                            self.cfg.sensor.presence_misses, exc)
+                for f in self._tool_failure_findings("barrido de subred", str(exc), failures, ts):
+                    self._persist(conn, [f], ts)
+                self.stop_event.wait(self.cfg.sensor.sweep_interval)
+                continue
+
+            inv.learning = baseline_status(conn)["learning"]
+            findings = inv.apply_sweep(result.hosts, ts)
+            self._persist(conn, findings, ts)
+            self._learn_gateway(conn, result.hosts, ts)
+            self._schedule_scans(conn, result.hosts, ts)
+            if first:
+                first = False
+                log.info("primer barrido", extra={"fields": {
+                    "backend": result.backend, "hosts": len(result.hosts),
+                    "ms": result.duration_ms, "degraded": result.degraded}})
+            else:
+                log.debug("barrido", extra={"fields": {
+                    "backend": result.backend, "hosts": len(result.hosts)}})
+            self.stop_event.wait(self.cfg.sensor.sweep_interval)
+
+    def _learn_gateway(self, conn, hosts: dict[str, str], ts: int) -> None:
+        gw = self.engine.baseline.gateway_ip
+        if not gw or not self.engine.baseline.gateway_mac:
+            if gw and hosts.get(gw):
+                with self._lock:
+                    self.engine.baseline.gateway_mac = hosts[gw]
+                store.set_meta(conn, "gateway_ip", gw, ts)
+                store.set_meta(conn, "gateway_mac", hosts[gw], ts)
+                log.info("línea base: gateway %s = %s", gw, hosts[gw])
+        else:
+            store.set_meta(conn, "gateway_ip", gw, ts)
+
+    def _schedule_scans(self, conn, hosts: dict[str, str], ts: int) -> None:
+        if not self.cfg.scan.enabled:
+            return
+        for ip in hosts:
+            if ip == self.sensor_ip:
+                continue
+            device = store.get_device_by_ip(conn, ip)
+            if device is None:
+                continue
+            last = device["last_scan_ts"]
+            if last is None:
+                profile = "standard"
+            elif ts - int(last) > QUICK_RESCAN_MS:
+                profile = "quick"
+            else:
+                continue
+            self._enqueue_scan(ScanJob(ip=ip, profile=profile,
+                                       device_id=int(device["id"])), origin="auto")
+
+    # ------------------------------------------------------- detección pasiva
+    def _on_neighbor(self, obs: Observation) -> None:
+        """Un vecino nuevo o cambiado es evidencia de capa 2 en tiempo real."""
+        if not ip_in_cidr(obs.ip_src, self.cfg.network.cidr):
+            return
+        if obs.ip_src == self.sensor_ip:
+            return
+        conn = self._conn()
+        ts = obs.ts
+        with self._lock:
+            findings = self.engine.observe(obs)
+        inv = Inventory(conn, self.cfg, self.oui, learning=baseline_status(conn)["learning"])
+        if obs.extra.get("event") in ("new", "change"):
+            findings.extend(inv.observe_host(obs.ip_src, obs.mac_src, ts, source="netlink"))
+        self._persist(conn, findings, ts)
+
+    def _sniff_loop(self) -> None:
+        """Sniffer pasivo real; sólo se ejecuta en modo live."""
+        from batrade.detect.sniffer import sniff_observations
+
+        conn = self._conn()
+        log.info("sniffer pasivo iniciado en %s", self.cfg.network.interface)
+
+        def handle(obs: Observation) -> None:
+            if self.stop_event.is_set():
+                return
+            c = self._conn()
+            with self._lock:
+                findings = self.engine.observe(obs)
+            if obs.kind == ARP and obs.ip_src and obs.mac_src:
+                inv = Inventory(c, self.cfg, self.oui,
+                                learning=baseline_status(c)["learning"])
+                findings.extend(inv.observe_host(obs.ip_src, obs.mac_src, obs.ts,
+                                                 source="sniff"))
+            self._persist(c, findings, obs.ts)
+
+        sniff_observations(self.cfg.network.interface, handle, self.stop_event)
+        del conn
+
+    # ------------------------------------------------------------- escaneos
+    def _enqueue_scan(self, job: ScanJob, origin: str = "auto") -> bool:
+        key = (job.ip, job.profile)
+        with self._lock:
+            if key in self._pending:
+                return False
+            self._pending.add(key)
+        try:
+            self.scan_queue.put_nowait(job)
+            return True
+        except queue.Full:
+            with self._lock:
+                self._pending.discard(key)
+            log.warning("cola de escaneos llena; se descarta %s", job.ip)
+            return False
+
+    def _scan_worker(self) -> None:
+        conn = self._conn()
+        while not self.stop_event.is_set():
+            try:
+                job = self.scan_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if job is None:
+                break
+            key = (job.ip, job.profile)
+            try:
+                self._run_scan(conn, job)
+            except Exception:
+                log.exception("escaneo falló", extra={"fields": {"ip": job.ip}})
+            finally:
+                with self._lock:
+                    self._pending.discard(key)
+
+    def _run_scan(self, conn, job: ScanJob) -> None:
+        ts = now_ms()
+        if not ip_in_cidr(job.ip, self.cfg.network.cidr):
+            log.warning("objetivo fuera de la subred: %s", job.ip)
+            if job.request_id:
+                store.close_scan_request(conn, job.request_id, "error", ts, "fuera del CIDR")
+            return
+        device = store.get_device_by_ip(conn, job.ip)
+        device_id = job.device_id or (int(device["id"]) if device else None)
+        scan_id = store.start_scan(conn, device_id, job.profile, job.profile,
+                                   f"nmap {job.profile} {job.ip}", ts)
+        udp_ports, udp_note = udp_risky_ports(self.cfg, self.caps)
+        try:
+            result = run_scan(self.cfg, job.ip, job.profile, self.caps)
+        except ScanError as exc:
+            failures = store.record_tool_status(conn, "nmap", now_ms(), False, error=str(exc))
+            store.finish_scan(conn, scan_id, ts=now_ms(), estado="error", error=str(exc))
+            if job.request_id:
+                store.close_scan_request(conn, job.request_id, "error", now_ms(), str(exc))
+            log.warning("nmap falló en %s: %s", job.ip, exc)
+            for f in self._tool_failure_findings("nmap", str(exc), failures, now_ms()):
+                self._persist(conn, [f], now_ms())
+            return
+
+        store.record_tool_status(conn, "nmap", now_ms(), True)
+        store.finish_scan(conn, scan_id, ts=now_ms(), estado="ok",
+                          xml_path=result.xml_path, exit_code=result.exit_code)
+        if job.request_id:
+            store.close_scan_request(conn, job.request_id, "hecho", now_ms())
+
+        if device_id is None:
+            return
+        if result.hostnames:
+            host = result.hostnames[0]
+            conn.execute("UPDATE devices SET hostname = COALESCE(hostname, ?) WHERE id = ?",
+                         (host[:63], device_id))
+        diff = store.apply_scan_ports(conn, device_id, result.ports, now_ms(),
+                                      self.cfg.scan.risky_ports)
+        findings = self._scan_findings(conn, device_id, job, diff, result, udp_note)
+        self._persist(conn, findings, now_ms())
+
+    def _scan_findings(self, conn, device_id: int, job: ScanJob, diff: dict,
+                       result, udp_note: str | None) -> list:
+        from batrade.detect.observation import Finding
+
+        device = store.get_device(conn, device_id)
+        nombre = (device["alias"] or device["hostname"] or device["ip_actual"]
+                  if device else job.ip)
+        state = device["estado_confianza"] if device else "desconocido"
+        out = []
+        for p in diff["new_risky"]:
+            out.append(Finding(
+                tipo="port_risky", severidad="warn",
+                clave=f"port:risky:{device_id}:{p['protocol']}:{p['port']}",
+                ip_origen=device["ip_actual"] if device else job.ip,
+                mac_origen=device["mac"] if device else None,
+                detalle={
+                    "resumen": (f"{nombre} expone el puerto {p['port']}/{p['protocol']} "
+                                f"({p['service'] or 'servicio desconocido'})"),
+                    "por_que": p["reason"],
+                    "accion": ("Deshabilitar el servicio si no se usa, o aislar el "
+                               "dispositivo en una VLAN de invitados."),
+                    "puerto": p["port"], "protocolo": p["protocol"],
+                    "servicio": p["service"], "version": p.get("version"),
+                },
+            ))
+        for p in diff["new_ports"]:
+            if state != "confiable":
+                continue
+            out.append(Finding(
+                tipo="port_new", severidad="warn",
+                clave=f"port:new:{device_id}:{p['protocol']}:{p['port']}",
+                ip_origen=device["ip_actual"] if device else job.ip,
+                mac_origen=device["mac"] if device else None,
+                detalle={
+                    "resumen": (f"Nuevo puerto {p['port']}/{p['protocol']} en {nombre}, "
+                                "antes marcado como confiable"),
+                    "por_que": "Un equipo de confianza abrió un servicio que no tenía.",
+                    "accion": "Comprobar si es una actualización legítima o un compromiso.",
+                    "puerto": p["port"], "protocolo": p["protocol"],
+                },
+            ))
+        if udp_note:
+            log.debug(udp_note)
+        return out
+
+    # --------------------------------------------------------------- replay
+    def _feed_loop(self) -> None:
+        conn = self._conn()
+        if self.mode == "replay":
+            path = self.pcap or self._default_pcap()
+            if path is None:
+                log.error("no hay pcap para replay; use --pcap o genere fixtures")
+                return
+            observations = scenarios.observations_from_pcap(path, speed=self.speed,
+                                                            base_ts=now_ms())
+            log.info("replay de %s (%d observaciones)", path, len(observations))
+        else:
+            name = self.scenario or "mixed"
+            observations = scenarios.synthetic(name, self.cfg)
+            log.info("simulación %s (%d observaciones)", name, len(observations))
+
+        inv = Inventory(conn, self.cfg, self.oui, learning=baseline_status(conn)["learning"])
+        previous = observations[0].ts if observations else 0
+        for obs in observations:
+            if self.stop_event.is_set():
+                return
+            gap = max(0, obs.ts - previous) / self.speed / 1000.0
+            previous = obs.ts
+            if gap > 0:
+                if self.stop_event.wait(min(gap, 1.0)):
+                    return
+            feed = replace(obs, ts=now_ms())
+            with self._lock:
+                findings = self.engine.observe(feed)
+            if obs.kind == ARP and obs.ip_src and obs.mac_src and obs.ip_src != self.sensor_ip:
+                findings.extend(inv.observe_host(obs.ip_src, obs.mac_src, feed.ts,
+                                                 source=self.mode))
+            self._persist(conn, findings, feed.ts)
+        log.info("secuencia de %s completada", self.mode)
+
+    def _default_pcap(self) -> str | None:
+        fixtures = self.cfg.root / "fixtures" / "pcaps"
+        candidate = fixtures / f"{self.scenario or 'mixed'}.pcap"
+        return str(candidate) if candidate.exists() else None
+
+    # ------------------------------------------------------------ persistencia
+    def _persist(self, conn, findings: Iterable, ts: int) -> int:
+        """Guarda hallazgos aplicando dedupe/cooldown y encolando notificaciones."""
+        from batrade.events import persist_findings
+
+        learning = baseline_status(conn)["learning"]
+        out = persist_findings(
+            conn, findings, self.cfg, ts, learning=learning,
+            enqueue=lambda eid, t: self.notifier.enqueue(conn, eid, t),
+        )
+        for finding, event_id, is_new in out:
+            if is_new and finding.needs_verify and self.cfg.detect.arp_verify:
+                self._spawn_verification(event_id, finding.needs_verify)
+        return len(out)
+
+    def _spawn_verification(self, event_id: int, ip: str) -> None:
+        if not self.caps.raw_capture:
+            return
+
+        def worker() -> None:
+            macs = probe_binding(ip, self.cfg.network.interface,
+                                 self.cfg.detect.arp_verify_timeout)
+            confirmed, explanation = interpret(macs, self.engine.baseline.gateway_mac)
+            conn = db.connect(self.cfg.paths.db)
+            try:
+                store.set_event_verified(conn, event_id, bool(confirmed),
+                                         {"verificacion": explanation,
+                                          "macs_observadas": sorted(macs or [])})
+            finally:
+                conn.close()
+
+        threading.Thread(target=worker, name="batrade-verify", daemon=True).start()
+
+    def _tool_failure_findings(self, tool: str, error: str, failures: int, ts: int) -> list:
+        from batrade.events import tool_failure_findings
+        return tool_failure_findings(tool, error, failures, ts)
+
+    # ---------------------------------------------------------------- arranque
+    def _log_startup(self) -> None:
+        fields = {
+            "mode": self.mode,
+            "requested": self.cfg.sensor.mode,
+            "iface": self.cfg.network.interface,
+            "cidr": self.cfg.network.cidr,
+            "raw": self.caps.raw_capture,
+            "oui": len(self.oui),
+        }
+        log.info("batrade-sensor arrancando", extra={"fields": fields})
+        for note in self.mode_notes:
+            log.warning(note)
+        for reason in self.caps.reasons:
+            log.info("capacidad: %s", reason)
+
+
+def cli_signal_handlers(stop_event: threading.Event) -> None:
+    def handler(signum, _frame):
+        log.info("señal %s recibida", signum)
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass

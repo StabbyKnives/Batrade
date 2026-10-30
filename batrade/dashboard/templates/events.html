@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Alertas{% endblock %}
+{% block content %}
+
+<section class="card">
+  <header class="card-head">
+    <h2>Historial de alertas</h2>
+    <span class="muted">{{ events|length }} mostradas (máx. 300)</span>
+  </header>
+
+  <form class="filters" method="get" action="{{ url_for('events') }}">
+    <select name="severidad">
+      <option value="">Todas las severidades</option>
+      {% for key, label in sev_label.items() %}
+      <option value="{{ key }}" {% if filtro.severidad == key %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="tipo">
+      <option value="">Todos los tipos</option>
+      {% for t in tipos %}
+      <option value="{{ t }}" {% if filtro.tipo == t %}selected{% endif %}>{{ t }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" type="submit">Filtrar</button>
+    <a class="btn ghost" href="{{ url_for('events') }}">Limpiar</a>
+  </form>
+
+  {% if events %}
+  <table class="table">
+    <thead>
+      <tr><th>Severidad</th><th>Evento</th><th>Origen</th><th>Destino</th>
+          <th>Cuándo</th><th>Rep.</th><th>KPI</th></tr>
+    </thead>
+    <tbody>
+    {% for e in events %}
+      <tr>
+        <td><span class="chip {{ e['severidad'] }}">{{ sev_label[e['severidad']] }}</span></td>
+        <td>
+          <details>
+            <summary>{{ e["tipo"] }}{% if e["verified"] %} <span class="tag ok">verificado</span>{% endif %}</summary>
+            <div class="detail">
+              {% set d = e["detalle_json"] %}
+              <pre>{{ d|json_pretty }}</pre>
+              <small class="muted">clave: {{ e["clave_dedupe"] }} ·
+                notificado: {{ "sí" if e["notificado"] else "no" }} ·
+                primera vez: {{ e["first_ts"]|ts }}</small>
+            </div>
+          </details>
+        </td>
+        <td class="mono small">{{ e["ip_origen"] or "—" }}<br>{{ e["mac_origen"] or "" }}</td>
+        <td class="mono small">{{ e["ip_destino"] or "—" }}</td>
+        <td title="{{ e['last_ts']|ts }}">{{ e["last_ts"]|ago }}</td>
+        <td class="mono">{{ e["repeat_count"] }}</td>
+        <td>
+          <form method="post" action="{{ url_for('event_disposition', event_id=e['id']) }}" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <select name="disposicion" onchange="this.form.submit()">
+              <option value="sin_evaluar" {% if e["disposicion"] == "sin_evaluar" %}selected{% endif %}>sin evaluar</option>
+              <option value="tp" {% if e["disposicion"] == "tp" %}selected{% endif %}>real</option>
+              <option value="fp" {% if e["disposicion"] == "fp" %}selected{% endif %}>falso positivo</option>
+            </select>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Sin alertas con ese filtro.</p>
+  {% endif %}
+</section>
+
+{% endblock %}

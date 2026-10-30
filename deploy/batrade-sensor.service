@@ -1,0 +1,41 @@
+[Unit]
+Description=Batrade Home-SOC sensor (IDS, solo detección)
+Documentation=file:///opt/batrade/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Usuario dedicado sin shell (crear con: useradd -r -s /usr/sbin/nologin batrade)
+User=batrade
+Group=batrade
+WorkingDirectory=/opt/batrade
+ExecStart=/usr/bin/python3 -m batrade sensor --mode auto
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Privilegios mínimos: solo lo necesario para capturar y hacer ARP.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=false
+
+# Endurecimiento del servicio
+PrivateTmp=true
+PrivateDevices=false
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths=/opt/batrade/var
+
+# Logs estructurados a journal + var/log/batrade.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=batrade-sensor
+
+[Install]
+WantedBy=multi-user.target

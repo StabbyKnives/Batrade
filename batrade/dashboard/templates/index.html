@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Panel{% endblock %}
+{% block content %}
+
+<section class="metrics">
+  <article class="metric">
+    <span class="metric-label">En línea</span>
+    <strong class="metric-value">{{ counts["online"] or 0 }}</strong>
+    <span class="metric-sub">de {{ counts["total"] or 0 }} conocidos</span>
+  </article>
+  <article class="metric">
+    <span class="metric-label">Desconocidos</span>
+    <strong class="metric-value {{ 'warn-text' if counts['desconocidos'] }}">{{ counts["desconocidos"] or 0 }}</strong>
+    <span class="metric-sub">pendientes de clasificar</span>
+  </article>
+  <article class="metric">
+    <span class="metric-label">No autorizados</span>
+    <strong class="metric-value {{ 'crit-text' if counts['no_autorizados'] }}">{{ counts["no_autorizados"] or 0 }}</strong>
+    <span class="metric-sub">marcados por ti</span>
+  </article>
+  <article class="metric">
+    <span class="metric-label">Alertas hoy</span>
+    <strong class="metric-value {{ 'crit-text' if sev['crit'] }}">{{ sev["crit"] }}</strong>
+    <span class="metric-sub">{{ sev["warn"] }} advertencias · {{ sev["info"] }} info</span>
+  </article>
+  <article class="metric">
+    <span class="metric-label">Falsos positivos hoy</span>
+    <strong class="metric-value">{{ fp_today }}</strong>
+    <span class="metric-sub">de {{ total_today }} eventos</span>
+  </article>
+  <article class="metric">
+    <span class="metric-label">Acceso</span>
+    <strong class="metric-value small">{{ "logueado" if session.get("auth") else "local" }}</strong>
+    <span class="metric-sub">{{ cfg.dashboard.host }}:{{ cfg.dashboard.port }}</span>
+  </article>
+</section>
+
+<div class="columns">
+  <section class="card grow">
+    <header class="card-head">
+      <h2>Últimas alertas</h2>
+      <a class="more" href="{{ url_for('events') }}">ver todas →</a>
+    </header>
+    {% if recent %}
+    <table class="table">
+      <thead><tr><th>Severidad</th><th>Evento</th><th>Origen</th><th>Cuándo</th><th></th></tr></thead>
+      <tbody>
+      {% for e in recent %}
+        <tr>
+          <td><span class="chip {{ e['severidad'] }}">{{ sev_label[e['severidad']] }}</span></td>
+          <td>
+            <a href="{{ url_for('events', tipo=e['tipo']) }}">{{ e['tipo'] }}</a>
+            {% if e["repeat_count"] > 1 %}<span class="repeat">×{{ e["repeat_count"] }}</span>{% endif %}
+          </td>
+          <td class="mono">{{ e["ip_origen"] or "—" }}<br><small>{{ e["mac_origen"] or "" }}</small></td>
+          <td title="{{ e['last_ts']|ts }}">{{ e["last_ts"]|ago }}</td>
+          <td>{% if e["disposicion"] == "fp" %}<span class="tag">FP</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">Todavía no hay eventos. Arranca el sensor o ejecuta
+      <code>python3 -m batrade demo</code> para poblar el panel.</p>
+    {% endif %}
+  </section>
+
+  <aside class="card side">
+    <header class="card-head"><h2>Estado</h2></header>
+    <dl class="kv">
+      <dt>Modo</dt><dd>{{ mode }}</dd>
+      <dt>Latido</dt><dd>{% if health.age is not none %}{{ health.age }} ms{% else %}sin datos{% endif %}</dd>
+      <dt>Captura pasiva</dt>
+      <dd>{% if caps["raw_capture"] %}<span class="ok-text">disponible</span>
+          {% else %}<span class="warn-text">no disponible (sin CAP_NET_RAW)</span>{% endif %}</dd>
+      <dt>Netlink vecinos</dt>
+      <dd>{% if caps["netlink_neigh"] %}<span class="ok-text">sí</span>{% else %}<span class="warn-text">no</span>{% endif %}</dd>
+      <dt>Línea base</dt>
+      <dd>{% if base.learning %}<span class="warn-text">en aprendizaje</span>
+          {% else %}aprobada{% endif %}</dd>
+      <dt>En revisión</dt><dd>{{ base.pending_review }}</dd>
+      <dt>Gateway</dt>
+      <dd class="mono">{{ base.gateway_ip or "—" }}<br><small>{{ base.gateway_mac or "MAC no aprendida" }}</small></dd>
+    </dl>
+    <div class="actions">
+      <a class="btn" href="{{ url_for('health_page') }}">Diagnóstico completo</a>
+    </div>
+  </aside>
+</div>
+
+{% endblock %}

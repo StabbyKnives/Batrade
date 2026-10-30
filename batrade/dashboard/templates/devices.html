@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Dispositivos{% endblock %}
+{% block content %}
+
+<section class="card">
+  <header class="card-head">
+    <h2>Inventario</h2>
+    <span class="muted">{{ counts["total"] or 0 }} dispositivos · {{ counts["online"] or 0 }} en línea</span>
+  </header>
+
+  <form class="filters" method="get" action="{{ url_for('devices') }}">
+    <input type="search" name="q" value="{{ filtro.q }}" placeholder="IP, MAC, alias o hostname">
+    <select name="estado">
+      <option value="">Todos los estados</option>
+      {% for key, label in trust_label.items() %}
+      <option value="{{ key }}" {% if filtro.estado == key %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <label class="check"><input type="checkbox" name="online" value="1"
+      {% if filtro.online %}checked{% endif %}> solo en línea</label>
+    <button class="btn" type="submit">Filtrar</button>
+    <a class="btn ghost" href="{{ url_for('devices') }}">Limpiar</a>
+  </form>
+
+  {% if devices %}
+  <table class="table">
+    <thead>
+      <tr><th>Estado</th><th>Dispositivo</th><th>IP actual</th><th>MAC</th>
+          <th>Fabricante</th><th>Última vez</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for d in devices %}
+      <tr class="{{ 'offline' if not d['en_linea'] }}">
+        <td><span class="chip trust-{{ d['estado_confianza'] }}">{{ trust_label[d['estado_confianza']] }}</span></td>
+        <td>
+          <a href="{{ url_for('device_detail', device_id=d['id']) }}">
+            {{ d["alias"] or d["hostname"] or "Equipo sin nombre" }}</a>
+          {% if d["mac_aleatoria"] %}<span class="tag" title="MAC de administración local">MAC local</span>{% endif %}
+        </td>
+        <td class="mono">{{ d["ip_actual"] or "—" }}</td>
+        <td class="mono">{{ d["mac"] }}</td>
+        <td>{{ d["fabricante"] or "—" }}</td>
+        <td title="{{ d['last_seen']|ts }}">{{ d["last_seen"]|ago }}</td>
+        <td>
+          <form method="post" action="{{ url_for('scan_request') }}" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="objetivo" value="{{ d['ip_actual'] or '' }}">
+            <input type="hidden" name="perfil" value="quick">
+            <input type="hidden" name="back" value="{{ url_for('devices') }}">
+            <button class="btn tiny" type="submit" {% if not d["ip_actual"] %}disabled{% endif %}>escanear</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Ningún dispositivo cumple el filtro.</p>
+  {% endif %}
+</section>
+
+{% endblock %}
