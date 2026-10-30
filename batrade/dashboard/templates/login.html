@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Acceso{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <header class="card-head"><h2>Acceso al panel</h2></header>
+  <p class="muted">Este panel está protegido con un token porque escucha fuera de loopback.</p>
+  <form method="post">
+    <label>Token
+      <input type="password" name="token" autofocus required>
+    </label>
+    <button class="btn" type="submit">Entrar</button>
+  </form>
+</section>
+{% endblock %}

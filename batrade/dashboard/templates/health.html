@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Salud{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Salud del sistema</h1>
+    <p class="muted">Un monitor caído no protege nada: esta página dice qué puede y qué no
+      puede ver el sensor en este host.</p>
+  </div>
+  <span class="pill {{ 'ok' if not health.stale else 'bad' }} big">
+    {{ "operativo" if not health.stale else "sensor sin latido" }}</span>
+</div>
+
+{% if mode_notes %}
+<div class="banner warn">
+  <strong>Modo {{ effective_mode }}.</strong>
+  {% for note in mode_notes %}{{ note }} {% endfor %}
+</div>
+{% endif %}
+
+<div class="columns">
+  <section class="card grow">
+    <header class="card-head"><h2>Capacidades detectadas</h2></header>
+    <table class="table compact">
+      <tbody>
+        <tr><td>CAP_NET_RAW / captura pasiva</td>
+            <td>{% if caps_summary.raw_capture %}<span class="ok-text">sí</span>
+                {% else %}<span class="crit-text">no</span>{% endif %}</td>
+            <td class="muted small">{{ "sniffer ARP/DHCP/SYN activo" if caps_summary.raw_capture
+                else "sin captura: ARP/DHCP sólo por replay y netlink" }}</td></tr>
+        <tr><td>arp-scan</td>
+            <td>{% if caps_summary.arp_scan %}<span class="ok-text">sí</span>
+                {% else %}<span class="warn-text">no</span>{% endif %}</td>
+            <td class="muted small">barrido activo cada {{ cfg.sensor.sweep_interval }} s</td></tr>
+        <tr><td>nmap</td>
+            <td>{% if caps_summary.nmap %}<span class="ok-text">sí</span>
+                {% else %}<span class="crit-text">no</span>{% endif %}</td>
+            <td class="muted small">perfilado de puertos y servicios</td></tr>
+        <tr><td>netlink de vecinos</td>
+            <td>{% if caps_summary.netlink_neigh %}<span class="ok-text">sí</span>
+                {% else %}<span class="warn-text">no</span>{% endif %}</td>
+            <td class="muted small">detección de cambios IP↔MAC en tiempo real sin privilegios</td></tr>
+        <tr><td>scapy</td>
+            <td>{% if caps_summary.scapy %}<span class="ok-text">sí</span>
+                {% else %}<span class="warn-text">no</span>{% endif %}</td>
+            <td class="muted small">replay de pcap y verificación activa</td></tr>
+      </tbody>
+    </table>
+    {% if caps.reasons %}
+    <ul class="reasons">
+      {% for r in caps.reasons %}<li>{{ r }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+
+  <aside class="card side">
+    <header class="card-head"><h2>Latido</h2></header>
+    <dl class="kv">
+      <dt>Estado</dt><dd>{{ health.state }}</dd>
+      <dt>Modo</dt><dd>{{ health.mode }}</dd>
+      <dt>Edad</dt><dd>{{ health.age if health.age is not none else "—" }} ms</dd>
+      <dt>Umbral</dt><dd>{{ cfg.sensor.heartbeat_interval * 3 }} s</dd>
+      <dt>Base de datos</dt><dd>{{ (db_size / 1024)|round(1) }} KiB</dd>
+      <dt>Retención</dt><dd>{{ cfg.sensor.retention_days }} días</dd>
+      <dt>Escaneos simultáneos</dt><dd>{{ cfg.scan.max_concurrent }}</dd>
+    </dl>
+    {% if health.detail %}
+    <details><summary>Último heartbeat</summary>
+      <pre class="small">{{ health.detail|tojson(indent=2) }}</pre>
+    </details>
+    {% endif %}
+  </aside>
+</div>
+
+<section class="card">
+  <header class="card-head"><h2>Herramientas externas</h2></header>
+  {% if tools %}
+  <table class="table compact">
+    <thead><tr><th>Herramienta</th><th>Último resultado</th><th>Fallos consecutivos</th>
+        <th>Cuándo</th><th>Error</th></tr></thead>
+    <tbody>
+    {% for t in tools %}
+      <tr>
+        <td class="mono">{{ t["herramienta"] }}</td>
+        <td>{% if t["ok"] %}<span class="ok-text">ok</span>
+            {% else %}<span class="crit-text">fallo</span>{% endif %}</td>
+        <td>{{ t["fallos_consecutivos"] }}</td>
+        <td title="{{ t['ts']|ts }}">{{ t["ts"]|ago }}</td>
+        <td class="muted small">{{ (t["error"] or "")[:120] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">El sensor todavía no ha ejecutado ninguna herramienta.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <header class="card-head"><h2>Solicitudes de escaneo</h2></header>
+  {% if requests %}
+  <table class="table compact">
+    <thead><tr><th>#</th><th>Objetivo</th><th>Perfil</th><th>Estado</th><th>Solicitada</th><th>Error</th></tr></thead>
+    <tbody>
+    {% for r in requests %}
+      <tr>
+        <td>{{ r["id"] }}</td><td class="mono">{{ r["objetivo"] }}</td>
+        <td>{{ r["perfil"] }}</td><td>{{ r["estado"] }}</td>
+        <td title="{{ r['ts']|ts }}">{{ r["ts"]|ago }}</td>
+        <td class="muted small">{{ (r["error"] or "")[:80] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Sin solicitudes. El sensor las procesa en segundo plano.</p>
+  {% endif %}
+</section>
+
+{% endblock %}

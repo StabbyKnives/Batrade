@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Línea base{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>Línea base de la red</h1>
+    <p class="muted">Aprobar el inventario base evita decenas de alertas en el primer arranque.
+      Los equipos con MAC aleatoria o sin datos quedan en revisión individual.</p>
+  </div>
+  <span class="chip {{ 'warn' if base.learning else 'ok' }} big">
+    {{ "en aprendizaje" if base.learning else "aprobada" }}</span>
+</div>
+
+<div class="columns">
+  <section class="card grow">
+    <header class="card-head"><h2>Aprobar en lote</h2></header>
+    <p class="muted">Los {{ base.pending_review }} equipos pendientes de revisión
+      (MAC local, sin hostname o sin fabricante) <strong>no</strong> se aprueban por defecto:
+      aprobarlos a ciegas legitima a cualquiera que ya estuviera conectado.</p>
+    <form method="post" action="{{ url_for('learning_approve') }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label class="check"><input type="checkbox" name="include_random" value="1">
+        Incluir también los equipos con MAC aleatoria (no recomendado)</label>
+      <button class="btn" type="submit">Aprobar línea base</button>
+    </form>
+    {% if base.approved_at %}
+    <p class="muted small">Aprobada el {{ base.approved_at|ts }}.</p>
+    {% endif %}
+  </section>
+
+  <aside class="card side">
+    <header class="card-head"><h2>Contexto de red</h2></header>
+    <dl class="kv">
+      <dt>Gateway</dt><dd class="mono">{{ base.gateway_ip or "—" }}</dd>
+      <dt>MAC gateway</dt><dd class="mono">{{ base.gateway_mac or "no aprendida" }}</dd>
+      <dt>DHCP esperado</dt><dd class="mono">{{ base.dhcp_server_ip or "sin definir" }}</dd>
+      <dt>Dispositivos</dt><dd>{{ base.devices["total"] }}</dd>
+    </dl>
+  </aside>
+</div>
+
+<section class="card">
+  <header class="card-head"><h2>Pendientes de revisión</h2>
+    <span class="muted">{{ pending|length }}</span></header>
+  {% if pending %}
+  <table class="table">
+    <thead><tr><th>IP</th><th>MAC</th><th>Hostname</th><th>Fabricante</th><th>Motivo</th><th></th></tr></thead>
+    <tbody>
+    {% for d in pending %}
+      <tr>
+        <td class="mono">{{ d["ip_actual"] or "—" }}</td>
+        <td class="mono">{{ d["mac"] }}</td>
+        <td>{{ d["hostname"] or "—" }}</td>
+        <td>{{ d["fabricante"] or "—" }}</td>
+        <td class="muted small">
+          {% if d["mac_aleatoria"] %}MAC local/aleatoria{% endif %}
+          {% if not d["hostname"] %} · sin hostname{% endif %}
+          {% if not d["fabricante"] %} · sin fabricante{% endif %}
+        </td>
+        <td><a class="btn tiny" href="{{ url_for('device_detail', device_id=d['id']) }}">revisar</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Nada pendiente: todo el inventario está clasificado.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <header class="card-head"><h2>Inventario completo</h2>
+    <span class="muted">{{ all_devices|length }}</span></header>
+  <table class="table compact">
+    <thead><tr><th>Estado</th><th>Equipo</th><th>IP</th><th>MAC</th><th>Última vez</th></tr></thead>
+    <tbody>
+    {% for d in all_devices %}
+      <tr>
+        <td><span class="chip trust-{{ d['estado_confianza'] }}">{{ trust_label[d['estado_confianza']] }}</span></td>
+        <td><a href="{{ url_for('device_detail', device_id=d['id']) }}">{{ d["alias"] or d["hostname"] or "sin nombre" }}</a></td>
+        <td class="mono">{{ d["ip_actual"] or "—" }}</td>
+        <td class="mono small">{{ d["mac"] }}</td>
+        <td title="{{ d['last_seen']|ts }}">{{ d["last_seen"]|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% endblock %}

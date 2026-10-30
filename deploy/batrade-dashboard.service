@@ -1,0 +1,36 @@
+[Unit]
+Description=Batrade Home-SOC panel web (solo lectura mayoritaria)
+Documentation=file:///opt/batrade/README.md
+After=network-online.target batrade-sensor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=batrade
+Group=batrade
+WorkingDirectory=/opt/batrade
+# Escucha solo en loopback. Para exponerlo, ver README §7 (token obligatorio).
+ExecStart=/usr/bin/python3 -m batrade dashboard --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+# El panel no necesita ninguna capability de red ni de captura.
+AmbientCapabilities=
+CapabilityBoundingSet=
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+# Solo lectura sobre la base; el sensor es el escritor principal.
+ReadWritePaths=/opt/batrade/var
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=batrade-dashboard
+
+[Install]
+WantedBy=multi-user.target
