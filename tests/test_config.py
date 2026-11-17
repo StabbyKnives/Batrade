@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from batrade.config import ConfigError, load_config
+from batrade.config import ConfigError, load_config, load_dotenv
 
 BASE = """
 network: {{ interface: lo, cidr: "{cidr}", gateway_ip: {gw} }}
@@ -73,3 +73,8 @@ def test_udp_and_tcp_catalog_coexist(cfg):
     assert ("udp", 1900) in cfg.scan.risky_ports
     assert ("tcp", 23) in cfg.scan.risky_ports
     assert cfg.scan.risky_ports[("tcp", 445)].service == "SMB"
+
+
+def test_unreadable_dotenv_is_ignored(tmp_path):
+    # En systemd el .env puede pertenecer a otro usuario: no debe tumbar el arranque.
+    assert load_dotenv(tmp_path) == {}

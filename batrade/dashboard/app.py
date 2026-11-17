@@ -202,11 +202,13 @@ def create_app(cfg: Config) -> Flask:
         device = store.get_device(conn, device_id)
         if device is None:
             abort(404)
+        assert device is not None  # abort no retorna; ayuda al type checker
+        gateway_ip = baseline_status(conn)["gateway_ip"] or cfg.network.gateway_ip
         return render_template(
             "device.html", device=device, ports=store.list_ports(conn, device_id),
             history=store.list_history(conn, device_id),
             events=store.events_for_device(conn, device_id),
-            is_gateway=(device["ip_actual"] == cfg.network.gateway_ip),
+            is_gateway=(device["ip_actual"] == gateway_ip),
             scans=list(conn.execute(
                 "SELECT * FROM scans WHERE device_id = ? ORDER BY id DESC LIMIT 10",
                 (device_id,))),

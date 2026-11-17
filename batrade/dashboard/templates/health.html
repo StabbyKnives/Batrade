@@ -19,6 +19,13 @@
 </div>
 {% endif %}
 
+{% if cfg.warnings %}
+<div class="banner warn">
+  <strong>Red detectada.</strong>
+  {% for note in cfg.warnings %}{{ note }} {% endfor %}
+</div>
+{% endif %}
+
 <div class="columns">
   <section class="card grow">
     <header class="card-head"><h2>Capacidades detectadas</h2></header>
@@ -59,6 +66,10 @@
     <dl class="kv">
       <dt>Estado</dt><dd>{{ health.state }}</dd>
       <dt>Modo</dt><dd>{{ health.mode }}</dd>
+      <dt>Interfaz</dt><dd>{{ cfg.network.interface or "—" }}
+        {% if cfg.network.interface_auto %}<span class="tag">auto</span>{% endif %}</dd>
+      <dt>Subred</dt><dd>{{ cfg.network.cidr }}
+        {% if cfg.network.cidr_auto %}<span class="tag">auto</span>{% endif %}</dd>
       <dt>Edad</dt><dd>{{ health.age if health.age is not none else "—" }} ms</dd>
       <dt>Umbral</dt><dd>{{ cfg.sensor.heartbeat_interval * 3 }} s</dd>
       <dt>Base de datos</dt><dd>{{ (db_size / 1024)|round(1) }} KiB</dd>

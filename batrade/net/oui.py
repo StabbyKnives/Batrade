@@ -11,9 +11,14 @@ from pathlib import Path
 from batrade.net.iputil import normalize_mac, oui_prefix
 
 CANDIDATE_FILES = (
-    "/usr/share/nmap/nmap-mac-prefixes",
-    "/usr/share/arp-scan/ieee-oui.txt",
-    "/usr/share/wireshark/manuf",
+    "/usr/share/nmap/nmap-mac-prefixes",          # Debian, Ubuntu, Kali, Parrot,
+                                                  # Fedora, Arch, openSUSE
+    "/usr/share/arp-scan/ieee-oui.txt",           # arp-scan en todas las distros
+    "/usr/share/ieee-data/oui.txt",               # Debian/Ubuntu (paquete ieee-data)
+    "/usr/share/wireshark/manuf",                 # Wireshark/TShark
+    "/usr/share/nmap-mac-prefixes",               # instalaciones desde fuente
+    "/usr/local/share/nmap/nmap-mac-prefixes",    # nmap compilado
+    "/opt/homebrew/share/nmap/nmap-mac-prefixes", # Linuxbrew/Homebrew en Linux
 )
 
 
@@ -39,7 +44,20 @@ class OuiDB:
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "OuiDB":
-        candidates = [Path(path)] if path else [Path(p) for p in CANDIDATE_FILES]
+        """Carga la primera base OUI utilizable.
+
+        La ruta configurada es una preferencia, no un requisito: si no existe
+        (por ejemplo nmap instalado por snap o una distro sin ese fichero) se
+        prueban las ubicaciones habituales de Debian/Kali, Fedora, Arch y
+        openSUSE. Sin base OUI el sensor sigue funcionando, sólo pierde el
+        nombre del fabricante.
+        """
+        candidates: list[Path] = []
+        if path:
+            candidates.append(Path(path))
+        for fallback in CANDIDATE_FILES:
+            if Path(fallback) not in candidates:
+                candidates.append(Path(fallback))
         for candidate in candidates:
             if not candidate.exists():
                 continue
@@ -73,6 +91,11 @@ def _parse(path: Path) -> dict[str, str]:
             if len(key) < 6 or len(key) > 9:
                 continue
             vendor = vendor.strip()
+            # ieee-data/oui.txt usa "00-00-0C   (hex)   Cisco Systems, Inc".
+            if "(hex)" in vendor:
+                vendor = vendor.split("(hex)", 1)[1].strip()
+            if "(base 16)" in vendor:
+                vendor = vendor.split("(base 16)", 1)[1].strip()
             if not vendor:
                 continue
             base = key[:6]

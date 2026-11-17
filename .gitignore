@@ -8,3 +8,7 @@ __pycache__/
 *.db-shm
 scans/
 dist/
+build/
+*.egg-info/
+.venv/
+CONTEXT.md
