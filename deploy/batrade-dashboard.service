@@ -10,9 +10,11 @@ User=batrade
 Group=batrade
 WorkingDirectory=/opt/batrade
 # Escucha solo en loopback. Para exponerlo, ver README §7 (token obligatorio).
-ExecStart=/usr/bin/python3 -m batrade dashboard --host 127.0.0.1 --port 8000
+# install.sh sustituye esta línea por el Python del sistema o el de .venv.
+ExecStart=/usr/bin/env python3 -m batrade dashboard --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
+Environment=PYTHONUNBUFFERED=1
 
 # El panel no necesita ninguna capability de red ni de captura.
 AmbientCapabilities=

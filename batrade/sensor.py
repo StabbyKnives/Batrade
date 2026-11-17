@@ -30,7 +30,8 @@ from batrade.detect.state import Baseline
 from batrade.inventory import Inventory, status as baseline_status
 from batrade.net import caps as caps_mod
 from batrade.net.discovery import Discovery, DiscoveryError
-from batrade.net.iputil import interface_ipv4, ip_in_cidr, normalize_mac, now_ms
+from batrade.net.iputil import (default_gateway, interface_ipv4, ip_in_cidr,
+                                normalize_mac, now_ms)
 from batrade.net.neigh import NeighborWatcher
 from batrade.net.nmap_scan import ScanError, run_scan, udp_risky_ports
 from batrade.net.oui import OuiDB
@@ -62,6 +63,7 @@ class Sensor:
         self.speed = max(1.0, float(speed))
         self.duration = duration
         self.stop_event = threading.Event()
+        self._closed = False
         self._local = threading.local()
         self._lock = threading.RLock()
         self._pending: set[tuple[str, str]] = set()
@@ -86,8 +88,15 @@ class Sensor:
 
     def _load_baseline(self) -> Baseline:
         b = Baseline()
-        b.gateway_ip = (store.get_meta(self.conn, "gateway_ip")
-                        or self.cfg.network.gateway_ip)
+        # Prioridad: lo aprendido y guardado > config.yaml > ruta por defecto.
+        gw = (store.get_meta(self.conn, "gateway_ip")
+              or self.cfg.network.gateway_ip
+              or default_gateway())
+        if gw and not ip_in_cidr(gw, self.cfg.network.cidr):
+            log.warning("gateway %s fuera de %s; se ignora como línea base",
+                        gw, self.cfg.network.cidr)
+            gw = None
+        b.gateway_ip = gw
         b.gateway_mac = store.get_meta(self.conn, "gateway_mac")
         b.dhcp_server_ip = (store.get_meta(self.conn, "dhcp_server_ip")
                             or self.cfg.network.dhcp_server_ip)
@@ -150,8 +159,11 @@ class Sensor:
             self.stop()
 
     def stop(self) -> None:
-        if self.stop_event.is_set():
+        # Idempotente: el manejador de señal ya pudo marcar stop_event antes
+        # de que run() llame a stop(); aun así hay que cerrar una sola vez.
+        if self._closed:
             return
+        self._closed = True
         self.stop_event.set()
         self.notifier.stop_event.set()
         try:
@@ -544,6 +556,8 @@ class Sensor:
             "oui": len(self.oui),
         }
         log.info("batrade-sensor arrancando", extra={"fields": fields})
+        for note in self.cfg.warnings:
+            log.info("red: %s", note)
         for note in self.mode_notes:
             log.warning(note)
         for reason in self.caps.reasons:

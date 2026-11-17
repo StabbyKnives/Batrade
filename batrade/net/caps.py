@@ -27,6 +27,7 @@ class Capabilities:
     tshark: bool = False
     scapy: bool = False
     arpspoof: bool = False
+    iproute: bool = False
     is_root: bool = False
     reasons: list[str] = field(default_factory=list)
 
@@ -38,6 +39,7 @@ class Capabilities:
             "netlink_neigh": self.netlink_neigh,
             "tshark": self.tshark,
             "scapy": self.scapy,
+            "iproute": self.iproute,
             "is_root": self.is_root,
         }
 
@@ -85,6 +87,11 @@ def probe() -> Capabilities:
     caps.arp_scan = shutil.which("arp-scan") is not None
     if not caps.arp_scan:
         caps.reasons.append("arp-scan no instalado")
+    caps.iproute = shutil.which("ip") is not None
+    if not caps.iproute:
+        caps.reasons.append(
+            "iproute2 (ip) no disponible: sin descubrimiento por vecinos ni barrido TCP"
+        )
     caps.nmap = shutil.which("nmap") is not None
     if not caps.nmap:
         caps.reasons.append("nmap no instalado")

@@ -10,10 +10,13 @@ Type=simple
 User=batrade
 Group=batrade
 WorkingDirectory=/opt/batrade
-ExecStart=/usr/bin/python3 -m batrade sensor --mode auto
+# /usr/bin/env respeta el Python del sistema o el de .venv instalado con
+# `install.sh --venv`; install.sh sustituye esta línea por la ruta absoluta.
+ExecStart=/usr/bin/env python3 -m batrade sensor --mode auto
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
+Environment=PYTHONUNBUFFERED=1
 
 # Privilegios mínimos: solo lo necesario para capturar y hacer ARP.
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN

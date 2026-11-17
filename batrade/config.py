@@ -5,14 +5,19 @@ Los secretos se resuelven por nombre de variable de entorno, nunca del YAML.
 """
 from __future__ import annotations
 
-import os
-import socket
 import ipaddress
+import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from batrade.net import ifaces
+from batrade.net.iputil import default_gateway
+
+log = logging.getLogger("batrade.config")
 
 
 class ConfigError(Exception):
@@ -110,6 +115,10 @@ class Config:
     notify: NotifyCfg = field(default_factory=NotifyCfg)
     dashboard: DashboardCfg = field(default_factory=DashboardCfg)
     paths: PathsCfg = field(default_factory=PathsCfg)
+    # Interfaz/subred resueltas automáticamente y avisos para el operador.
+    interface_auto: bool = False
+    cidr_auto: bool = False
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def network_obj(self) -> ipaddress.IPv4Network:
@@ -125,12 +134,21 @@ class Config:
 # .env
 # --------------------------------------------------------------------------- #
 def load_dotenv(path: Path) -> dict[str, str]:
-    """Parser mínimo de .env. No sobreescribe variables ya presentes en el entorno."""
+    """Parser mínimo de .env. No sobreescribe variables ya presentes en el entorno.
+
+    Un `.env` ilegible no puede tumbar el arranque: en una instalación systemd
+    el fichero puede pertenecer a otro usuario. Se avisa y se sigue sin él.
+    """
     values: dict[str, str] = {}
     if not path.exists():
         return values
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        log.warning("no se pudo leer %s: %s", path, exc)
+        return values
+    for line in raw.splitlines():
+        line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
@@ -190,7 +208,12 @@ def load_config(path: str | Path = "config.yaml", root: str | Path | None = None
         raise ConfigError([f"No existe el archivo de configuración: {cfg_path}"])
 
     try:
-        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        raw_config = cfg_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError([f"No se pudo leer {cfg_path}: {exc}"]) from exc
+
+    try:
+        data = yaml.safe_load(raw_config) or {}
     except yaml.YAMLError as exc:
         raise ConfigError([f"YAML inválido en {cfg_path}: {exc}"]) from exc
     if not isinstance(data, dict):
@@ -207,14 +230,94 @@ def load_config(path: str | Path = "config.yaml", root: str | Path | None = None
     dash_raw = data.get("dashboard") or {}
     path_raw = data.get("paths") or {}
 
+    mode = str(_get(sen_raw, "mode", "auto")).lower()
+    warnings: list[str] = []
+    info: ifaces.IfaceInfo | None = None
+
+    # ------------------------------------------------------- interfaz/subred
+    # ``auto`` permite arrancar en cualquier equipo (Ethernet o Wi-Fi) sin
+    # editar el YAML: se elige la interfaz de la ruta por defecto.
+    requested_iface = str(_get(net_raw, "interface", "auto")).strip()
+    requested_cidr = str(_get(net_raw, "cidr", "auto")).strip()
+    interface_auto = requested_iface.lower() in ifaces.AUTO_VALUES
+    cidr_auto = requested_cidr.lower() in ifaces.AUTO_VALUES
+
+    if interface_auto:
+        info, reason = ifaces.pick(None)
+        if info is None:
+            interface = ""
+            if mode in ("replay", "simulate"):
+                warnings.append(
+                    f"sin interfaz IPv4 autodetectable; el modo {mode} no necesita red real"
+                )
+            else:
+                errors.append(
+                    "no se pudo autodetectar una interfaz IPv4; define network.interface "
+                    "con un nombre real (ver `python3 -m batrade interfaces`)"
+                )
+        else:
+            interface = info.name
+            warnings.append(f"interfaz autodetectada: {info.name} ({info.kind}) — {reason}")
+            if info.wireless:
+                warnings.append(
+                    "interfaz Wi-Fi: la captura pasiva sólo verá el tráfico del propio "
+                    "equipo; el barrido ARP y netlink siguen funcionando (para ver todo "
+                    "el tráfico usa un puerto espejo)"
+                )
+    else:
+        interface = requested_iface
+        info = ifaces.find(interface)
+        if info is None:
+            errors.append(f"network.interface inexistente en este sistema: {interface}")
+
+    if cidr_auto:
+        derived = info.cidr if info is not None else None
+        if derived:
+            cidr = derived
+            warnings.append(f"subred derivada de {interface}: {cidr}")
+        else:
+            cidr = "192.168.1.0/24"
+            if mode in ("replay", "simulate"):
+                warnings.append(
+                    f"sin IPv4 para derivar la subred; se usa {cidr} para la simulación"
+                )
+            elif info is not None or interface_auto:
+                errors.append(
+                    f"network.cidr=auto pero {interface or 'la interfaz'} no tiene IPv4"
+                )
+    else:
+        cidr = requested_cidr
+
+    gateway_ip = net_raw.get("gateway_ip") or None
+    if gateway_ip is None and mode in ("auto", "live", "degraded"):
+        auto_gw = default_gateway()
+        if auto_gw:
+            try:
+                inside = ipaddress.IPv4Address(auto_gw) in ipaddress.IPv4Network(cidr, strict=False)
+            except ValueError:
+                inside = False
+            if inside:
+                gateway_ip = auto_gw
+                warnings.append(f"gateway autodetectado: {auto_gw}")
+            else:
+                warnings.append(
+                    f"la ruta por defecto apunta a {auto_gw}, fuera de {cidr}; se deja sin "
+                    "gateway hasta que definas network.gateway_ip"
+                )
+
     network = NetworkCfg(
-        interface=str(_get(net_raw, "interface", "eth0")),
-        cidr=str(_get(net_raw, "cidr", "192.168.1.0/24")),
-        gateway_ip=net_raw.get("gateway_ip"),
+        interface=interface,
+        cidr=cidr,
+        gateway_ip=gateway_ip,
         dhcp_server_ip=net_raw.get("dhcp_server_ip"),
     )
+    # Si el YAML trae un gateway vacío, _get ya lo habría dejado en None.
+    if network.gateway_ip in ("", "null", "None"):
+        network.gateway_ip = None
+    if network.dhcp_server_ip in ("", "null", "None"):
+        network.dhcp_server_ip = None
     sensor = SensorCfg(
-        mode=str(_get(sen_raw, "mode", "auto")).lower(),
+        mode=mode,
         sweep_interval=int(_get(sen_raw, "sweep_interval", 30)),
         presence_misses=int(_get(sen_raw, "presence_misses", 3)),
         heartbeat_interval=int(_get(sen_raw, "heartbeat_interval", 15)),
@@ -269,12 +372,6 @@ def load_config(path: str | Path = "config.yaml", root: str | Path | None = None
     # ---------------------------------------------------------------- checks
     if sensor.mode not in ("auto", "live", "degraded", "replay", "simulate"):
         errors.append(f"sensor.mode inválido: {sensor.mode!r}")
-    try:
-        iface_index = socket.if_nametoindex(network.interface)
-        if iface_index <= 0:
-            errors.append(f"network.interface inexistente: {network.interface}")
-    except OSError:
-        errors.append(f"network.interface inexistente en este sistema: {network.interface}")
 
     try:
         net = ipaddress.IPv4Network(network.cidr, strict=False)
@@ -341,7 +438,8 @@ def load_config(path: str | Path = "config.yaml", root: str | Path | None = None
         raise ConfigError(errors)
 
     cfg = Config(root=base, network=network, sensor=sensor, scan=scan,
-                 detect=detect, notify=notify, dashboard=dashboard, paths=paths)
+                 detect=detect, notify=notify, dashboard=dashboard, paths=paths,
+                 interface_auto=interface_auto, cidr_auto=cidr_auto, warnings=warnings)
     cfg.ensure_dirs()
     return cfg
 

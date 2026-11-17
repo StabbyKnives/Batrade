@@ -14,13 +14,15 @@ import io
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 from batrade import __version__, db, store
 from batrade.config import Config, ConfigError, load
 from batrade.logging_setup import setup_logging
 from batrade.net import caps as caps_mod
-from batrade.net.iputil import default_gateway, interface_ipv4
+from batrade.net import ifaces
+from batrade.net.iputil import default_gateway, ip_in_cidr
 
 log = logging.getLogger("batrade.cli")
 
@@ -38,6 +40,23 @@ def _parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", parents=[common], help="diagnóstico de entorno y configuración")
     sub.add_parser("init", parents=[common], help="crea la base de datos y los directorios")
+    sub.add_parser("interfaces", parents=[common], aliases=["ifaces"],
+                   help="lista las interfaces IPv4 (Ethernet/Wi-Fi) detectadas")
+
+    st = sub.add_parser("start", parents=[common],
+                        help="arranca sensor y panel en segundo plano")
+    st.add_argument("--only", choices=["sensor", "dashboard"], default=None,
+                    help="arrancar sólo un componente")
+    st.add_argument("--mode", choices=["auto", "live", "degraded"], default=None,
+                    help="modo del sensor al arrancar")
+
+    sp = sub.add_parser("stop", parents=[common], help="detiene sensor y panel")
+    sp.add_argument("--only", choices=["sensor", "dashboard"], default=None)
+
+    rp = sub.add_parser("restart", parents=[common], help="reinicia sensor y panel")
+    rp.add_argument("--only", choices=["sensor", "dashboard"], default=None)
+
+    sub.add_parser("status", parents=[common], help="estado de sensor y panel")
 
     s = sub.add_parser("sensor", parents=[common], help="ejecuta el demonio de monitoreo")
     s.add_argument("--mode", default=None,
@@ -84,7 +103,10 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(cfg.paths.log_dir, "batrade")
     handler = {"doctor": cmd_doctor, "init": cmd_init, "sensor": cmd_sensor,
                "dashboard": cmd_dashboard, "demo": cmd_demo,
-               "approve-baseline": cmd_approve, "export": cmd_export}[args.command]
+               "approve-baseline": cmd_approve, "export": cmd_export,
+               "interfaces": cmd_interfaces, "ifaces": cmd_interfaces,
+               "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
+               "status": cmd_status}[args.command]
     try:
         return int(handler(cfg, args) or 0)
     except KeyboardInterrupt:
@@ -101,28 +123,138 @@ def cmd_doctor(cfg: Config, _args) -> int:
     conn = db.initialize(cfg.paths.db)
     rows = store.count_devices(conn)
     hb = store.get_heartbeat(conn, "sensor")
+    info = ifaces.find(cfg.network.interface) if cfg.network.interface else None
 
     print(f"Batrade {__version__}  ·  {cfg.root}")
-    print(f"  interfaz        : {cfg.network.interface} "
-          f"({interface_ipv4(cfg.network.interface) or 'sin IPv4'})")
-    print(f"  subred          : {cfg.network.cidr}")
+    origen = "autodetectada" if cfg.interface_auto else "fijada"
+    detalle = f"{info.address()}, {info.kind}" if info else "sin IPv4"
+    print(f"  interfaz        : {cfg.network.interface or '(ninguna)'} "
+          f"({origen}; {detalle})")
+    print(f"  subred          : {cfg.network.cidr}"
+          f"{'  (derivada)' if cfg.cidr_auto else ''}")
     print(f"  gateway         : {cfg.network.gateway_ip or default_gateway() or 'desconocido'}")
     print(f"  modo solicitado : {cfg.sensor.mode}  ->  efectivo: {mode}")
     print(f"  CAP_NET_RAW     : {'sí' if caps.raw_capture else 'NO'}")
     print(f"  arp-scan        : {'sí' if caps.arp_scan else 'NO'}   "
           f"nmap: {'sí' if caps.nmap else 'NO'}   "
-          f"tshark: {'sí' if caps.tshark else 'NO'}")
+          f"iproute2: {'sí' if caps.iproute else 'NO'}")
     print(f"  netlink vecinos : {'sí' if caps.netlink_neigh else 'NO'}   "
-          f"scapy: {'sí' if caps.scapy else 'NO'}")
+          f"scapy: {'sí' if caps.scapy else 'NO'}   "
+          f"tshark: {'sí' if caps.tshark else 'NO'}")
     print(f"  base de datos   : {cfg.paths.db}  schema v{db.SCHEMA_VERSION}")
     print(f"  dispositivos    : {rows.get('total', 0)} "
           f"(en línea {rows.get('online', 0)}, desconocidos {rows.get('desconocidos', 0)})")
     print(f"  heartbeat       : {'nunca' if hb is None else hb['ts']}")
-    for note in notes:
+    for note in cfg.warnings:
         print(f"  aviso           : {note}")
+    for note in notes:
+        print(f"  modo            : {note}")
     for reason in caps.reasons:
         print(f"  limitación      : {reason}")
     print("\nConsejo: `python3 -m batrade demo` puebla el panel sin privilegios.")
+    return 0
+
+
+def cmd_interfaces(cfg: Config, _args) -> int:
+    rows = ifaces.list_ipv4(include_loopback=True)
+    default = ifaces.default_iface()
+    print(f"Batrade {__version__} · interfaces IPv4 de este host\n")
+    if not rows:
+        print("  No se detectó ninguna interfaz IPv4 (¿iproute2 instalado?).")
+        return 1
+    print(f"  {'INTERFAZ':<14}{'TIPO':<10}{'ESTADO':<8}{'IP/CIDR':<20}{'MAC':<19}RUTA")
+    for info in sorted(rows, key=lambda r: (r.loopback, r.name)):
+        ruta = "defecto" if info.name == default else ""
+        estado = "up" if info.up else "down"
+        print(f"  {info.name:<14}{info.kind:<10}{estado:<8}{info.address():<20}"
+              f"{(info.mac or '—'):<19}{ruta}")
+    actual = cfg.network.interface or "auto"
+    print(f"\n  Config actual: interface={actual}  cidr={cfg.network.cidr}  "
+          f"gateway={cfg.network.gateway_ip or 'auto'}")
+    print("  La selección automática usa la ruta por defecto y prefiere cable.")
+    print("  Para fijar una interfaz: network.interface: <INTERFAZ> "
+          "(y network.cidr: auto).")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Control del servicio (start/stop/restart/status)
+# --------------------------------------------------------------------------- #
+def _config_file(args) -> Path:
+    """Ruta absoluta del config.yaml con la que arrancar los hijos."""
+    path = Path(args.config)
+    if not path.is_absolute():
+        path = (Path(args.root) if args.root else Path.cwd()) / path
+    return path.resolve()
+
+
+def cmd_start(cfg: Config, args) -> int:
+    from batrade.daemon import DaemonError, start_component
+
+    targets = [args.only] if args.only else ["sensor", "dashboard"]
+    config_file = _config_file(args)
+    for name in targets:
+        mode = getattr(args, "mode", None) if name == "sensor" else None
+        try:
+            _info, message = start_component(cfg, config_file, name, mode)
+        except DaemonError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        print(message)
+    print(f"Panel: http://{cfg.dashboard.host}:{cfg.dashboard.port}")
+    print(f"Estado: {sys.executable} -m batrade status")
+    print(f"Parar : {sys.executable} -m batrade stop")
+    return 0
+
+
+def cmd_stop(cfg: Config, args) -> int:
+    from batrade.daemon import stop_component
+
+    targets = [args.only] if args.only else ["dashboard", "sensor"]
+    for name in targets:
+        _info, message = stop_component(cfg, name)
+        print(message)
+    return 0
+
+
+def cmd_restart(cfg: Config, args) -> int:
+    from batrade.daemon import DaemonError, start_component, stop_component
+
+    targets = [args.only] if args.only else ["sensor", "dashboard"]
+    for name in reversed(targets):
+        print(stop_component(cfg, name)[1])
+    time.sleep(0.3)
+    config_file = _config_file(args)
+    for name in targets:
+        try:
+            _info, message = start_component(cfg, config_file, name)
+        except DaemonError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        print(message)
+    print(f"Panel: http://{cfg.dashboard.host}:{cfg.dashboard.port}")
+    return 0
+
+
+def cmd_status(cfg: Config, _args) -> int:
+    from batrade.daemon import status_all
+
+    for info in status_all(cfg):
+        print(f"  {info.name:<10} {info.state()}")
+        print(f"  {'':<10} log: {info.logfile}")
+    age: int | None = None
+    try:
+        conn = db.connect(cfg.paths.db, readonly=True)
+        try:
+            hb = store.get_heartbeat(conn, "sensor")
+        finally:
+            conn.close()
+        if hb is not None:
+            age = max(0, (store_now() - int(hb["ts"])) // 1000)
+    except Exception:  # base inexistente o aún sin latido
+        age = None
+    print(f"  {'latido':<10} {'sin datos' if age is None else f'hace {age} s'}")
+    print(f"  {'panel':<10} http://{cfg.dashboard.host}:{cfg.dashboard.port}")
     return 0
 
 
@@ -130,10 +262,16 @@ def cmd_init(cfg: Config, _args) -> int:
     conn = db.initialize(cfg.paths.db)
     ts = store_now()
     gw = cfg.network.gateway_ip or default_gateway()
+    if gw and not ip_in_cidr(gw, cfg.network.cidr):
+        print(f"  aviso: gateway {gw} fuera de {cfg.network.cidr}; no se guarda")
+        gw = None
     if gw:
         store.set_meta(conn, "gateway_ip", gw, ts)
     store.set_meta(conn, "sensor_mode", cfg.sensor.mode, ts)
+    store.set_meta(conn, "interface", cfg.network.interface, ts)
     print(f"Base de datos lista en {cfg.paths.db}")
+    print(f"Interfaz vigilada: {cfg.network.interface or '(ninguna)'}  ·  "
+          f"subred {cfg.network.cidr}  ·  gateway {gw or 'sin definir'}")
     print(f"Directorio de escaneos: {cfg.paths.scans_dir}")
     print("Siguiente paso: `python3 -m batrade sensor --mode degraded` y "
           "`python3 -m batrade dashboard` en otra terminal.")
@@ -141,18 +279,21 @@ def cmd_init(cfg: Config, _args) -> int:
 
 
 def cmd_sensor(cfg: Config, args) -> int:
-    from batrade.sensor import Sensor
+    from batrade.sensor import Sensor, cli_signal_handlers
 
     mode = args.mode or cfg.sensor.mode
     sensor = Sensor(cfg, mode, scenario=args.scenario, pcap=args.pcap,
                     speed=args.speed, duration=args.duration)
     print(f"batrade-sensor en modo {sensor.mode} · {cfg.network.cidr} sobre "
-          f"{cfg.network.interface}")
+          f"{cfg.network.interface or '(sin interfaz)'}")
+    for note in cfg.warnings:
+        print(f"  red: {note}")
     for note in sensor.mode_notes:
         print(f"  aviso: {note}")
     if sensor.mode in ("replay", "simulate"):
         print(f"  alimentando motor desde "
               f"{args.pcap or args.scenario} a {args.speed}x")
+    cli_signal_handlers(sensor.stop_event)
     sensor.run()
     return 0
 

@@ -2,14 +2,17 @@
 # Secretos (token de Telegram, webhook de Discord) van en .env, nunca aquí.
 
 network:
-  # Interfaz del sensor. OBLIGATORIA y explícita: con varias NICs la
-  # autodetección puede elegir la red equivocada.
-  interface: eth1
-  # Subred bajo vigilancia (IPv4, /24 recomendado).
-  cidr: 192.168.200.0/24
-  # Vacío = se toma la puerta de enlace por defecto de la tabla de rutas.
-  gateway_ip: 192.168.200.1
-  # Vacío = no se evalúa la regla de DHCP no autorizado.
+  # auto = elige en cada arranque la interfaz de la ruta por defecto, sea
+  # Ethernet (eth0, enp3s0, eno1...) o Wi-Fi (wlp2s0, wlan0...). Para vigilar
+  # una red concreta, pon el nombre real de la interfaz; `python3 -m batrade
+  # interfaces` las lista con su IP, MAC y tipo.
+  interface: auto
+  # auto = deriva la subred (CIDR normalizado) de la IP y la máscara.
+  cidr: auto
+  # Vacío/null = puerta de enlace por defecto de la tabla de rutas, sólo si
+  # pertenece a la subred vigilada.
+  gateway_ip: null
+  # Vacío = la regla de DHCP aprende el primer servidor que responda.
   dhcp_server_ip: null
 
 sensor:
@@ -86,5 +89,6 @@ paths:
   scans_dir: var/scans
   log_dir: var/log
   alerts_log: var/alerts.log
-  # Base OUI local, sin internet (RF-02).
+  # Base OUI local, sin internet (RF-02). Si esta ruta no existe se prueban
+  # las ubicaciones de nmap/arp-scan/wireshark de cada distribución.
   oui_file: /usr/share/nmap/nmap-mac-prefixes
