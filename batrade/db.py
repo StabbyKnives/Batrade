@@ -11,12 +11,16 @@ Convenciones:
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+log = logging.getLogger("batrade.db")
 
-SCHEMA = """
+# Esquema inicial (versión 1). No se modifica: toda evolución del esquema va
+# como una migración nueva, aditiva e idempotente al final de MIGRATIONS.
+SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS identities (
     id          INTEGER PRIMARY KEY,
     key         TEXT NOT NULL UNIQUE,
@@ -161,6 +165,33 @@ CREATE TABLE IF NOT EXISTS tool_status (
 );
 """
 
+# --------------------------------------------------------------------------- #
+# Migraciones versionadas
+# --------------------------------------------------------------------------- #
+# Cada entrada es ``(versión, pasos)`` y las versiones deben ser crecientes.
+# ``pasos`` puede ser un script SQL, una secuencia de sentencias o una función
+# ``fn(conn)``. Reglas:
+#   - sólo aditivas (ALTER TABLE ADD COLUMN, CREATE ... IF NOT EXISTS);
+#   - idempotentes (se pueden repetir si el proceso muere antes de confirmar);
+#   - nunca destructivas.
+# El runner aplica cada una en su propia transacción y avanza
+# ``PRAGMA user_version`` dentro de esa misma transacción.
+
+def _migration_v2_notification_index(conn: sqlite3.Connection) -> None:
+    """Índice para la purga de la cola de notificación por antigüedad (RNF-06)."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_nq_estado_ts ON notification_queue(estado, ts)"
+    )
+
+
+MIGRATIONS: list[tuple[int, str | Sequence[str] | Callable[[sqlite3.Connection], None]]] = [
+    (1, SCHEMA_V1),
+    (2, _migration_v2_notification_index),
+]
+
+# La versión del esquema se deriva de la lista: una sola fuente de verdad.
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+
 
 def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
     """Abre una conexión con los PRAGMA que el diseño exige (WAL, busy_timeout)."""
@@ -181,19 +212,112 @@ def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
     return conn
 
 
-def migrate(conn: sqlite3.Connection) -> int:
-    """Crea/actualiza el esquema. Idempotente.
-
-    ``executescript`` hace COMMIT implícito, así que no se envuelve en una
-    transacción explícita; todas las sentencias son CREATE ... IF NOT EXISTS.
-    """
-    try:
-        conn.executescript(SCHEMA)
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-    except sqlite3.DatabaseError:
-        raise
+def user_version(conn: sqlite3.Connection) -> int:
+    """Versión de esquema registrada en la base (0 = base vacía o sin migrar)."""
     row = conn.execute("PRAGMA user_version").fetchone()
-    return int(row[0]) if row else SCHEMA_VERSION
+    return int(row[0]) if row else 0
+
+
+def _split_sql(script: str) -> list[str]:
+    """Divide un script en sentencias completas para ejecutarlas una a una.
+
+    ``executescript`` hace COMMIT implícito y rompería la transacción de la
+    migración, así que las sentencias se ejecutan sueltas con ``execute``.
+    """
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            if buffer.strip():
+                statements.append(buffer.strip())
+            buffer = ""
+    if buffer.strip():
+        statements.append(buffer.strip())
+    return statements
+
+
+def _run_migration(conn: sqlite3.Connection,
+                   steps: str | Sequence[str] | Callable[[sqlite3.Connection], None]) -> None:
+    if callable(steps):
+        steps(conn)
+        return
+    if isinstance(steps, str):
+        statements = _split_sql(steps)
+    else:
+        statements = [str(s) for s in steps]
+    for statement in statements:
+        conn.execute(statement)
+
+
+def _main_db_path(conn: sqlite3.Connection) -> Path | None:
+    """Ruta del archivo SQLite de la conexión (None para bases en memoria)."""
+    for row in conn.execute("PRAGMA database_list"):
+        name, file = row[1], row[2]
+        if name == "main" and file:
+            return Path(file)
+    return None
+
+
+def backup(conn: sqlite3.Connection, version: int) -> Path | None:
+    """Copia de seguridad previa a migrar: ``<db>.bak-v<versión>`` (permisos 600).
+
+    Nunca sobrescribe una copia anterior: si el nombre ya existe añade ``-2``,
+    ``-3``… Usa la API de backup de SQLite para incluir lo que aún esté en el
+    WAL. Devuelve la ruta creada o ``None`` si no había nada que copiar.
+    """
+    path = _main_db_path(conn)
+    if path is None or not path.exists() or path.stat().st_size == 0:
+        return None
+    target = path.with_name(f"{path.name}.bak-v{version}")
+    suffix = 2
+    while target.exists():
+        target = path.with_name(f"{path.name}.bak-v{version}-{suffix}")
+        suffix += 1
+    dest = sqlite3.connect(str(target))
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    try:
+        target.chmod(0o600)
+    except OSError:  # pragma: no cover - sistemas sin permisos POSIX
+        pass
+    log.info("copia de seguridad del esquema v%s en %s", version, target.name)
+    return target
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """Aplica las migraciones pendientes y devuelve la versión resultante.
+
+    - Sólo se ejecutan las versiones mayores que ``PRAGMA user_version``.
+    - Cada migración corre en su propia transacción junto con el avance de
+      ``user_version``: si falla, ni el esquema ni la versión cambian.
+    - Antes de tocar una base existente con datos se guarda una copia.
+    - Una base nueva recibe todas las migraciones y queda en la última versión.
+    """
+    current = user_version(conn)
+    if current > SCHEMA_VERSION:
+        log.warning("la base (v%s) es más nueva que el código (v%s); no se migra",
+                    current, SCHEMA_VERSION)
+        return current
+    pending = [(v, steps) for v, steps in MIGRATIONS if v > current]
+    if not pending:
+        return current
+    if current > 0:
+        backup(conn, current)
+    for version, steps in pending:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _run_migration(conn, steps)
+            conn.execute(f"PRAGMA user_version = {int(version)}")
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        log.debug("migración aplicada", extra={"fields": {"version": version}})
+    return user_version(conn)
 
 
 def recover_interrupted(conn: sqlite3.Connection, ts: int) -> dict[str, int]:

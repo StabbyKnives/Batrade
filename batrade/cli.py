@@ -141,7 +141,9 @@ def cmd_doctor(cfg: Config, _args) -> int:
     print(f"  netlink vecinos : {'sí' if caps.netlink_neigh else 'NO'}   "
           f"scapy: {'sí' if caps.scapy else 'NO'}   "
           f"tshark: {'sí' if caps.tshark else 'NO'}")
-    print(f"  base de datos   : {cfg.paths.db}  schema v{db.SCHEMA_VERSION}")
+    version = db.user_version(conn)
+    pendiente = "" if version == db.SCHEMA_VERSION else f" (pendiente v{db.SCHEMA_VERSION})"
+    print(f"  base de datos   : {cfg.paths.db}  schema v{version}{pendiente}")
     print(f"  dispositivos    : {rows.get('total', 0)} "
           f"(en línea {rows.get('online', 0)}, desconocidos {rows.get('desconocidos', 0)})")
     print(f"  heartbeat       : {'nunca' if hb is None else hb['ts']}")
@@ -269,7 +271,7 @@ def cmd_init(cfg: Config, _args) -> int:
         store.set_meta(conn, "gateway_ip", gw, ts)
     store.set_meta(conn, "sensor_mode", cfg.sensor.mode, ts)
     store.set_meta(conn, "interface", cfg.network.interface, ts)
-    print(f"Base de datos lista en {cfg.paths.db}")
+    print(f"Base de datos lista en {cfg.paths.db}  ·  schema v{db.user_version(conn)}")
     print(f"Interfaz vigilada: {cfg.network.interface or '(ninguna)'}  ·  "
           f"subred {cfg.network.cidr}  ·  gateway {gw or 'sin definir'}")
     print(f"Directorio de escaneos: {cfg.paths.scans_dir}")
