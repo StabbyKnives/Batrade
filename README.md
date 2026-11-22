@@ -220,6 +220,8 @@ Scheduling happens after each sweep: a device seen for the first time gets a `st
 
 UDP ports of the catalogue are scanned with a second, tightly bounded nmap pass (`-sU -p U:<catalogue> --host-timeout 30s --max-retries 1`) only when the sensor has `CAP_NET_RAW`. Only ports reported `open` are stored: `open|filtered` is the normal outcome for UDP without a reply and would produce false positives. Without raw capture the pass is skipped, the sensor logs the limitation once per scan, and `/health` shows *"UDP no verificable sin CAP_NET_RAW"*. A protocol that was not scanned never marks its known ports as closed.
 
+**Closing ports is a claim, and only `standard`/`vuln` may make it.** `quick` (`-F`) covers roughly the top 100 TCP ports, so its silence about everything else proves nothing: it only opens and updates ports. A port that really disappears is marked `closed` by the next `standard` scan, and if it later comes back, that reappearance is reported again as `port_new` (and `port_risky` for catalogue ports) because a service that returns is news. The trade-off: a genuine closure can take until the next `standard` scan (weekly by default) to be reflected in the panel.
+
 ## Data retention
 
 The sensor purges once an hour, using `sensor.retention_days` (default 90):

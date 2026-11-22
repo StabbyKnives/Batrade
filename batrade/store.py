@@ -223,15 +223,22 @@ def known_ports(conn: sqlite3.Connection, device_id: int) -> dict[tuple[str, int
 
 def apply_scan_ports(conn: sqlite3.Connection, device_id: int, found: Iterable[dict[str, Any]],
                      ts: int, risky: dict[tuple[str, int], RiskyPort],
-                     protocolos: Iterable[str] | None = None) -> dict[str, list]:
+                     protocolos: Iterable[str] | None = None,
+                     perfil: str | None = None) -> dict[str, list]:
     """Inserta/actualiza puertos y clasifica lo observado frente al catálogo.
 
     ``protocolos`` limita qué protocolos se consideran explorados: un puerto
     conocido de un protocolo que no se escaneó (p. ej. UDP en modo degradado)
     no puede marcarse como cerrado.
+
+    ``perfil`` limita qué perfil puede cerrar puertos. ``quick`` usa ``-F``
+    (≈100 puertos TCP), así que su silencio sobre el resto no es evidencia de
+    cierre: sólo ``standard`` y ``vuln`` cierran. Sin perfil se mantiene el
+    comportamiento histórico (lo usan llamadores internos y tests de diff).
     """
     before = known_ports(conn, device_id)
     explorados = {str(p).lower() for p in protocolos} if protocolos is not None else None
+    cierra = perfil is None or perfil in ("standard", "vuln")
     seen_keys: set[tuple[str, int]] = set()
     new_risky: list[dict[str, Any]] = []
     new_ports: list[dict[str, Any]] = []
@@ -258,12 +265,17 @@ def apply_scan_ports(conn: sqlite3.Connection, device_id: int, found: Iterable[d
         )
         info = {"protocol": proto, "port": port, "service": servicio, "version": version,
                 "reason": risk.reason if risk else None}
-        if risk and (prev is None or not prev["riesgoso"]):
+        # Un puerto que estaba cerrado y vuelve a estar abierto es una señal
+        # real (servicio reactivado), igual que uno que nunca se había visto.
+        reabierto = prev is not None and str(prev["estado"]) != "open"
+        if risk and (prev is None or not prev["riesgoso"] or reabierto):
             new_risky.append(info)
-        elif prev is None:
+        elif prev is None or reabierto:
             new_ports.append(info)
 
-    for key, row in before.items():
+    # Cerrar un puerto es una afirmación ("ya no está"); sólo la hacen los
+    # perfiles que cubren el rango completo.
+    for key, row in (before.items() if cierra else ()):
         if explorados is not None and key[0] not in explorados:
             continue
         if key not in seen_keys and row["estado"] == "open":

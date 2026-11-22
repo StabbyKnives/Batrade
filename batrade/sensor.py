@@ -502,7 +502,8 @@ class Sensor:
                          (host[:63], device_id))
         diff = store.apply_scan_ports(conn, device_id, result.ports, now_ms(),
                                       self.cfg.scan.risky_ports,
-                                      protocolos=result.protocols)
+                                      protocolos=result.protocols,
+                                      perfil=job.profile)
         findings = self._scan_findings(conn, device_id, job, diff, result)
         self._persist(conn, findings, now_ms())
 
