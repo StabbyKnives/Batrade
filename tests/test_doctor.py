@@ -50,3 +50,43 @@ def test_doctor_without_heartbeat(cfg, capsys):
 def test_human_ms_tolerates_garbage():
     assert cli._human_ms(0)
     assert cli._human_ms(10 ** 20) == "fecha inválida"
+
+
+# --------------------------------------------------------------------------- #
+# Bloque «Prueba en VM»
+# --------------------------------------------------------------------------- #
+def test_looks_virtual_by_name_and_mac():
+    assert cli.looks_virtual("vboxnet0", None) is True
+    assert cli.looks_virtual("eth0", "08:00:27:aa:bb:cc") is True
+    assert cli.looks_virtual("enp3s0", "3c:22:fb:11:22:33") is False
+    assert cli.looks_virtual(None, None) is False
+
+
+def test_vm_probe_lines_without_raw(cfg):
+    from batrade.net.caps import Capabilities
+
+    lineas = cli.vm_probe_lines(cfg, Capabilities(raw_capture=False), "degraded")
+    texto = " ".join(lineas)
+    assert "CAP_NET_RAW NO" in texto
+    assert "sudo" in texto
+    assert "virtual/NAT" in texto
+
+
+def test_vm_probe_lines_with_raw(cfg):
+    from batrade.net.caps import Capabilities
+
+    texto = " ".join(cli.vm_probe_lines(cfg, Capabilities(raw_capture=True), "live"))
+    assert "CAP_NET_RAW sí" in texto
+    assert "listo para modo live" in texto
+
+
+def test_doctor_prints_vm_block(cfg, capsys, monkeypatch):
+    from batrade import db
+    from batrade.net.caps import Capabilities
+
+    monkeypatch.setattr(cli.caps_mod, "probe", lambda: Capabilities(raw_capture=False))
+    db.initialize(cfg.paths.db)
+    cli.cmd_doctor(cfg, None)
+    salida = capsys.readouterr().out
+    assert "prueba en VM" in salida
+    assert "interfaz virtual/NAT" in salida

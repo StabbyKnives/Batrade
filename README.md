@@ -389,6 +389,84 @@ When you later move to systemd, stop the CLI-managed components first (or use `-
 - **No vendor names** — Batrade uses a local OUI file and falls back across the usual nmap, arp-scan and Wireshark locations. Install `nmap` or `arp-scan` to populate it; vendor names are cosmetic.
 - **Dashboard shows a stale gateway** — the sensor stores the learned gateway in `network_baseline`; rerun `batrade init` after changing networks.
 
+## Real test on a VM
+
+This is the recommended path for a first real run.
+
+**VM requirements**
+
+- Any modern Linux (Debian/Ubuntu/Kali, Fedora, Arch, openSUSE, Alpine) with Python ≥ 3.11.
+- A second network adapter in **bridged** mode on the LAN you want to watch, or the host's
+  physical adapter passed through. NAT works but limits visibility: the VM only sees its
+  own traffic, so ARP spoofing aimed at other hosts and most broadcasts are invisible.
+- Allow **promiscuous mode** on the virtual switch/hypervisor if it offers that option
+  (VirtualBox: *Promiscuous Mode: Allow All*; VMware: *Promiscuous*); without it the vNIC
+  drops frames not addressed to it.
+- 1 vCPU and 512 MB are enough; 2 GB leaves room for `vuln` scans.
+- Root or `sudo` inside the VM (needed for `CAP_NET_RAW`, i.e. live mode).
+
+**Install in one command**
+
+```bash
+sudo bash install.sh --system --install-deps --start
+```
+
+That installs to `/opt/batrade`, links `batrade` into `/usr/local/bin`, installs nmap/arp-scan
+and starts the sensor and the dashboard. If you prefer the repository in place, use
+`sudo batrade start` from the repo instead (see *Pick one control plane* above).
+
+**Check that it is really watching**
+
+```bash
+batrade status            # sensor/dashboard PIDs, heartbeat age, user, effective mode
+batrade doctor            # CAP_NET_RAW sí/no, interface, mode, "Prueba en VM" block
+batrade interfaces        # which NIC carries the default route, MAC and kind
+curl -s http://127.0.0.1:8000/health   # capabilities, mode, tool status, UDP coverage
+```
+
+`doctor` must report `modo … efectivo: live` and `CAP_NET_RAW: sí` for full coverage. If it
+says `degraded`, the sensor still works (netlink + TCP connect scans) but does not capture
+packets or scan UDP; run it with `sudo`.
+
+**First-use flow**
+
+1. Let it sweep for a few minutes and open `http://<vm>:8000/devices`.
+2. Review the inventory while learning mode is active (new devices are `info`, not alerted).
+3. Annotate what you recognize (alias + trust state) and check `/learning` for candidates
+   with random MACs.
+4. Run `sudo batrade approve-baseline` once the inventory is complete: from then on new or
+   unauthorized devices alert normally.
+
+**Exercising detections without an attack**
+
+```bash
+batrade stop                 # the demo writes to the same database
+batrade demo                 # seeds synthetic scenarios (mixed, router_reboot)
+batrade dashboard            # inspect /events and /devices
+```
+
+Then clean up what the demo wrote:
+
+```bash
+batrade stop
+sudo batrade reset-db --yes              # full wipe + restart of the learning baseline
+sudo batrade reset-db --keep-devices     # keep the inventory, drop simulated events
+```
+
+**Verify UDP by hand**
+
+Follow *Verifying UDP detection by hand* above: with `CAP_NET_RAW` and a device answering
+SSDP or mDNS you should see a `port_risky` event for `1900/udp` or `5353/udp`. This is the one
+check the automated suite cannot do for you.
+
+**Uninstall**
+
+```bash
+sudo batrade stop
+sudo bash install.sh --uninstall          # removes code and command, keeps var/, .env, config.yaml
+sudo bash install.sh --uninstall --purge --yes   # removes data and configuration too
+```
+
 ## Running tests
 
 ```bash

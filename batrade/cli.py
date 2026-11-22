@@ -214,6 +214,40 @@ def mode_hint(caps, mode: str) -> str | None:
     return None
 
 
+# Prefijos de MAC típicos de hipervisores: en una VM suelen indicar NAT o
+# puente del host, y el sniffer verá menos tráfico del real.
+VIRTUAL_MAC_PREFIXES = ("08:00:27", "00:0c:29", "00:50:56", "52:54:00", "00:15:5d")
+VIRTUAL_IFACE_HINTS = ("vboxnet", "vmnet", "virbr", "docker", "br-", "veth", "tap",
+                       "tun", "lxc", "podman")
+
+
+def looks_virtual(name: str | None, mac: str | None) -> bool:
+    """Heurística: ¿la interfaz parece de hipervisor o contenedor?
+
+    No distingue NAT de puente (no es observable desde dentro), pero avisa de
+    que en una VM el adaptador suele ser virtual y conviene revisar el modo.
+    """
+    nombre = (name or "").lower()
+    if any(nombre.startswith(p) for p in VIRTUAL_IFACE_HINTS):
+        return True
+    return (mac or "").lower().startswith(VIRTUAL_MAC_PREFIXES)
+
+
+def vm_probe_lines(cfg: Config, caps, mode: str) -> list[str]:
+    """Líneas informativas del bloque «Prueba en VM» de `doctor`."""
+    info = ifaces.find(cfg.network.interface) if cfg.network.interface else None
+    mac = info.mac if info else None
+    virtual = looks_virtual(cfg.network.interface, mac)
+    detalle = "sí (hipervisor: NAT o puente)" if virtual else "no"
+    pista = ("sin CAP_NET_RAW: para 'live' ejecuta el sensor con sudo"
+             if not caps.raw_capture else "listo para modo live")
+    return [
+        f"modo {mode} · CAP_NET_RAW {'sí' if caps.raw_capture else 'NO'} · "
+        f"interfaz virtual/NAT: {detalle}",
+        f"{cfg.network.interface or '(sin interfaz)'} · subred {cfg.network.cidr} · {pista}",
+    ]
+
+
 def cmd_doctor(cfg: Config, _args) -> int:
     caps = caps_mod.probe()
     mode, notes = caps_mod.resolve_mode(cfg.sensor.mode, caps)
@@ -257,6 +291,10 @@ def cmd_doctor(cfg: Config, _args) -> int:
         print(f"  modo            : {note}")
     for reason in caps.reasons:
         print(f"  limitación      : {reason}")
+    lineas_vm = vm_probe_lines(cfg, caps, mode)
+    for i, linea in enumerate(lineas_vm):
+        etiqueta = "prueba en VM" if i == 0 else ""
+        print(f"  {etiqueta:<16}: {linea}")
     print("\nConsejo: `python3 -m batrade demo` puebla el panel sin privilegios.")
     return 0
 
