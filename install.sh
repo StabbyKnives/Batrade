@@ -189,8 +189,10 @@ check_tools() {
             echo "  instalar con : sudo ${INSTALL_CMD[*]} $PKGS"
             if ((INSTALL_DEPS)); then
                 echo "  instalando dependencias de sistema..."
-                # $PKGS se expande sin comillas a propósito: son paquetes separados.
-                if ! run_root "${INSTALL_CMD[@]}" $PKGS; then
+                # $PKGS son paquetes separados por espacios: se convierte en array
+                # para pasarlos como argumentos sin depender de la expansión sin comillas.
+                read -r -a PKGS_ARR <<< "$PKGS"
+                if ! run_root "${INSTALL_CMD[@]}" "${PKGS_ARR[@]}"; then
                     echo "  aviso       : la instalación automática falló; instala nmap, arp-scan" >&2
                     echo "                e iproute2 a mano y usa --venv para las dependencias Python" >&2
                 fi
