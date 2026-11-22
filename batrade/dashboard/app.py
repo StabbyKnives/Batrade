@@ -25,6 +25,7 @@ from batrade.inventory import approve_baseline, review_candidates
 from batrade.inventory import status as baseline_status
 from batrade.net import caps as caps_mod
 from batrade.net.iputil import ip_in_cidr, now_ms, valid_ipv4
+from batrade.net.nmap_scan import udp_risky_ports
 
 TRUST_LABEL = {"confiable": "Confiable", "desconocido": "Desconocido",
                "no_autorizado": "No autorizado"}
@@ -50,6 +51,7 @@ def create_app(cfg: Config) -> Flask:
     db.initialize(cfg.paths.db)
     caps = caps_mod.probe()
     mode, mode_notes = caps_mod.resolve_mode(cfg.sensor.mode, caps)
+    _udp_ports, udp_note = udp_risky_ports(cfg, caps)
 
     app = Flask(__name__)
     secret = (hashlib.sha256(cfg.dashboard.auth_token.encode()).hexdigest()
@@ -309,6 +311,7 @@ def create_app(cfg: Config) -> Flask:
         hb = store.get_heartbeat(conn, "sensor")
         return render_template("health.html", health=health, caps=caps,
                                caps_summary=caps.summary(), mode_notes=mode_notes,
+                               udp_note=udp_note,
                                tools=tools, heartbeat=hb, db_size=size,
                                requests=list(conn.execute(
                                    "SELECT * FROM scan_requests ORDER BY id DESC LIMIT 20")),

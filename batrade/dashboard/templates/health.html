@@ -26,6 +26,12 @@
 </div>
 {% endif %}
 
+{% if udp_note %}
+<div class="banner warn">
+  <strong>Cobertura UDP incompleta.</strong> {{ udp_note }}
+</div>
+{% endif %}
+
 <div class="columns">
   <section class="card grow">
     <header class="card-head"><h2>Capacidades detectadas</h2></header>

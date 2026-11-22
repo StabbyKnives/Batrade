@@ -222,9 +222,16 @@ def known_ports(conn: sqlite3.Connection, device_id: int) -> dict[tuple[str, int
 
 
 def apply_scan_ports(conn: sqlite3.Connection, device_id: int, found: Iterable[dict[str, Any]],
-                     ts: int, risky: dict[tuple[str, int], RiskyPort]) -> dict[str, list]:
-    """Inserta/actualiza puertos y clasifica lo observado frente al catálogo."""
+                     ts: int, risky: dict[tuple[str, int], RiskyPort],
+                     protocolos: Iterable[str] | None = None) -> dict[str, list]:
+    """Inserta/actualiza puertos y clasifica lo observado frente al catálogo.
+
+    ``protocolos`` limita qué protocolos se consideran explorados: un puerto
+    conocido de un protocolo que no se escaneó (p. ej. UDP en modo degradado)
+    no puede marcarse como cerrado.
+    """
     before = known_ports(conn, device_id)
+    explorados = {str(p).lower() for p in protocolos} if protocolos is not None else None
     seen_keys: set[tuple[str, int]] = set()
     new_risky: list[dict[str, Any]] = []
     new_ports: list[dict[str, Any]] = []
@@ -257,6 +264,8 @@ def apply_scan_ports(conn: sqlite3.Connection, device_id: int, found: Iterable[d
             new_ports.append(info)
 
     for key, row in before.items():
+        if explorados is not None and key[0] not in explorados:
+            continue
         if key not in seen_keys and row["estado"] == "open":
             conn.execute(
                 "UPDATE ports SET estado = 'closed', last_seen = ? "

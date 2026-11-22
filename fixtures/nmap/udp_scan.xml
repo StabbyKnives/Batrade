@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Fixture sintético: pasada UDP sobre una red de laboratorio 10.10.10.0/24.
+     No contiene datos de equipos reales. -->
+<nmaprun scanner="nmap" args="nmap -sU -p U:1900,5353" start="1760000000" version="7.99">
+<host><status state="up"/>
+<hostnames><hostname name="lab-tv.local" type="PTR"/></hostnames>
+<ports>
+<port protocol="udp" portid="1900"><state state="open" reason="udp-response"/>
+  <service name="upnp" method="table"/></port>
+<port protocol="udp" portid="5353"><state state="open|filtered" reason="no-response"/>
+  <service name="mdns" method="table"/></port>
+<port protocol="udp" portid="68"><state state="closed" reason="reset"/></port>
+</ports>
+</host></nmaprun>

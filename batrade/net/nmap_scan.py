@@ -35,6 +35,12 @@ PROFILES: dict[str, list[str]] = {
 PROFILE_TIMEOUT = {"quick": 120, "standard": 300, "vuln": 900}
 HOST_TIMEOUT = {"quick": "60s", "standard": "120s", "vuln": "300s"}
 
+# Pasada UDP de los puertos del catálogo: acotada a propósito, porque UDP no
+# responde y nmap debe esperar timeouts. Sólo se ejecuta con CAP_NET_RAW.
+UDP_HOST_TIMEOUT = "30s"
+UDP_MAX_RETRIES = "1"
+UDP_PROCESS_TIMEOUT = 90
+
 
 def profile_timeout(cfg: Config, profile: str) -> int:
     """Límite de proceso del perfil, respetando ``scan.*_timeout`` del YAML.
@@ -66,6 +72,9 @@ class ScanResult:
     exit_code: int | None = None
     duration_ms: int = 0
     notes: list[str] = field(default_factory=list)
+    # Protocolos realmente explorados: si UDP no se pudo escanear, sus puertos
+    # conocidos no deben marcarse como cerrados.
+    protocols: set[str] = field(default_factory=lambda: {"tcp"})
 
 
 def build_argv(cfg: Config, target: str, profile: str, caps: Capabilities,
@@ -79,6 +88,25 @@ def build_argv(cfg: Config, target: str, profile: str, caps: Capabilities,
             cfg.scan.timing, "--host-timeout", HOST_TIMEOUT[profile],
             "-oX", str(xml_path), target]
     return argv
+
+
+def build_udp_argv(cfg: Config, target: str, caps: Capabilities,
+                   xml_path: Path) -> list[str]:
+    """argv de la pasada UDP acotada a los puertos UDP del catálogo.
+
+    Devuelve ``[]`` cuando no hay nada que explorar: sin ``CAP_NET_RAW`` no se
+    puede hacer un escaneo UDP real y nmap sólo devolvería ``open|filtered``.
+    """
+    if not caps.raw_capture:
+        return []
+    udp_ports, _note = udp_risky_ports(cfg, caps)
+    if not udp_ports:
+        return []
+    if not ip_in_cidr(target, cfg.network.cidr):
+        raise ScanError(f"objetivo fuera del CIDR configurado: {target}")
+    return ["nmap", "-sU", "-Pn", "-p", "U:" + ",".join(str(p) for p in udp_ports),
+            cfg.scan.timing, "--host-timeout", UDP_HOST_TIMEOUT,
+            "--max-retries", UDP_MAX_RETRIES, "-oX", str(xml_path), target]
 
 
 def run_scan(cfg: Config, target: str, profile: str = "standard",
@@ -127,7 +155,54 @@ def run_scan(cfg: Config, target: str, profile: str = "standard",
         pass
     if result.exit_code not in (0, None):
         result.notes.append(f"nmap terminó con código {result.exit_code}")
+    _run_udp_pass(cfg, target, caps, result)
     return result
+
+
+def _run_udp_pass(cfg: Config, target: str, caps: Capabilities,
+                  result: ScanResult) -> None:
+    """Pasada UDP opcional (UPnP/SSDP, mDNS) cuando hay CAP_NET_RAW.
+
+    Un fallo de esta pasada no invalida el escaneo TCP: se anota y se sigue.
+    Sólo se conservan los puertos en estado ``open``; ``open|filtered`` es lo
+    habitual en UDP y no demuestra que el servicio exista.
+    """
+    udp_path = cfg.paths.scans_dir / f"scan-udp-{target}-{int(time.time() * 1000)}.xml"
+    try:
+        argv = build_udp_argv(cfg, target, caps, udp_path)
+    except ScanError as exc:
+        result.notes.append(str(exc))
+        return
+    if not argv:
+        return
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=UDP_PROCESS_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired:
+        _safe_unlink(udp_path)
+        result.notes.append(f"la pasada UDP excedió {UDP_PROCESS_TIMEOUT}s")
+        return
+    except OSError as exc:
+        _safe_unlink(udp_path)
+        result.notes.append(f"no se pudo ejecutar la pasada UDP: {exc}")
+        return
+    try:
+        if not udp_path.exists():
+            result.notes.append(f"la pasada UDP no generó XML (código {proc.returncode})")
+            return
+        parsed = parse_xml(udp_path)
+        for port in parsed["ports"]:
+            port["protocol"] = "udp"
+            result.ports.append(port)
+        result.protocols.add("udp")
+        if proc.returncode not in (0, None):
+            result.notes.append(f"la pasada UDP terminó con código {proc.returncode}")
+    except Exception as exc:  # noqa: BLE001 - nunca invalidar el resultado TCP
+        result.notes.append(f"XML de la pasada UDP inválido: {exc}")
+    finally:
+        # La fila de `scans` referencia un único XML: los puertos UDP ya están
+        # volcados y el archivo no debe quedar fuera de la retención.
+        _safe_unlink(udp_path)
 
 
 def parse_xml(path: str | Path) -> dict[str, Any]:
@@ -180,11 +255,16 @@ def _safe_unlink(path: Path) -> None:
 
 
 def udp_risky_ports(cfg: Config, caps: Capabilities) -> tuple[list[int], str | None]:
-    """Los puertos riesgosos UDP sólo se pueden verificar con privilegios."""
+    """Puertos UDP del catálogo y la nota que explica por qué no se exploran.
+
+    Sin ``CAP_NET_RAW`` no se puede hacer un escaneo UDP real: nmap marcaría
+    todo como ``open|filtered`` y generaríamos falsos positivos. La nota se
+    registra una vez por ejecución y se muestra en ``/health``.
+    """
     udp = sorted(p.port for p in cfg.scan.risky_ports.values() if p.protocol == "udp")
     if not udp:
         return [], None
     if not caps.raw_capture:
-        return [], ("sin CAP_NET_RAW no se puede escanear UDP: los puertos "
-                    f"{udp} no se evaluaron (UPnP/SSDP, mDNS)")
+        return [], ("UDP no verificable sin CAP_NET_RAW: los puertos "
+                    f"{udp} (UPnP/SSDP, mDNS) no se evalúan en modo degradado")
     return udp, None

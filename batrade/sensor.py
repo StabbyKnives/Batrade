@@ -424,7 +424,11 @@ class Sensor:
         device_id = job.device_id or (int(device["id"]) if device else None)
         scan_id = store.start_scan(conn, device_id, job.profile, job.profile,
                                    f"nmap {job.profile} {job.ip}", ts)
-        udp_ports, udp_note = udp_risky_ports(self.cfg, self.caps)
+        _udp_ports, udp_note = udp_risky_ports(self.cfg, self.caps)
+        if udp_note:
+            # Una sola vez por ejecución de escaneo: el operador debe saber que
+            # los puertos UDP del catálogo no se han podido verificar.
+            log.info(udp_note)
         try:
             result = run_scan(self.cfg, job.ip, job.profile, self.caps)
         except ScanError as exc:
@@ -450,12 +454,13 @@ class Sensor:
             conn.execute("UPDATE devices SET hostname = COALESCE(hostname, ?) WHERE id = ?",
                          (host[:63], device_id))
         diff = store.apply_scan_ports(conn, device_id, result.ports, now_ms(),
-                                      self.cfg.scan.risky_ports)
-        findings = self._scan_findings(conn, device_id, job, diff, result, udp_note)
+                                      self.cfg.scan.risky_ports,
+                                      protocolos=result.protocols)
+        findings = self._scan_findings(conn, device_id, job, diff, result)
         self._persist(conn, findings, now_ms())
 
     def _scan_findings(self, conn, device_id: int, job: ScanJob, diff: dict,
-                       result, udp_note: str | None) -> list:
+                       result) -> list:
         from batrade.detect.observation import Finding
 
         device = store.get_device(conn, device_id)
@@ -495,8 +500,6 @@ class Sensor:
                     "puerto": p["port"], "protocolo": p["protocol"],
                 },
             ))
-        if udp_note:
-            log.debug(udp_note)
         return out
 
     # --------------------------------------------------------------- replay
