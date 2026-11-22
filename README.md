@@ -171,9 +171,9 @@ batrade interfaces
 
 ```
 INTERFAZ      TIPO      ESTADO  IP/CIDR             MAC                RUTA
-eth0          ethernet  up      192.168.0.50/24     00:1a:2b:3c:4d:5e  defecto
+eth0          ethernet  up      192.168.0.50/24     aa:bb:cc:00:11:33  defecto
 wlp2s0        wi-fi     up      10.0.0.20/24        aa:bb:cc:00:11:33
-vmnet19       ethernet  up      192.168.150.1/24    00:0c:29:1b:2c:3d
+vmnet19       ethernet  up      192.168.150.1/24    aa:bb:cc:00:11:33
 lo            loopback  up      127.0.0.1/8         00:00:00:00:00:00
 ```
 
