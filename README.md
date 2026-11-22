@@ -10,12 +10,21 @@ Batrade is a passive intrusion detection system for home and small-office networ
 - Rogue DHCP servers
 - Router reboots (gateway MAC change)
 - New or unauthorized devices joining the network
-- Risky open ports on known devices (Telnet, RDP, VNC, UPnP, and others)
-- Risky UDP services (UPnP/SSDP 1900, mDNS 5353) when `CAP_NET_RAW` is available; in degraded mode the panel states that UDP cannot be verified
+- Risky open ports on known devices — TCP (Telnet, RDP, VNC, SMB…) and, with `CAP_NET_RAW`, UDP (UPnP/SSDP 1900, mDNS 5353)
+
+## Requirements
+
+- Python 3.11 or later.
+- Linux with `nmap` and `iproute2` (`ip` ships with every desktop/server distribution).
+- `arp-scan` for full live mode (optional — the sensor degrades gracefully without it).
+- Python packages: `PyYAML`, `Flask`, `requests`, `defusedxml`, `scapy` (from the distribution or from a virtualenv).
+- `CAP_NET_RAW` for live mode: passive capture, `arp-scan` and the UDP pass. Without it the sensor runs in `degraded` mode.
+
+On distributions that mark the system interpreter as externally managed (PEP 668: Fedora, recent Debian/Ubuntu, Arch), use the `--venv` installer flag.
 
 ## Supported distributions
 
-Batrade has no distribution-specific code. It only shells out to `iproute2` (`ip`), `nmap` and, optionally, `arp-scan`, so it runs on any modern Linux. The installer detects the distribution from `/etc/os-release` and picks the matching package manager:
+Batrade has no distribution-specific code: it only shells out to `iproute2` (`ip`), `nmap`, optionally `arp-scan` and (for the service guard) `systemctl`. The installer detects the distribution from `/etc/os-release` and picks the matching package manager:
 
 | Family | Distributions | Manager | Packages |
 |---|---|---|---|
@@ -25,73 +34,114 @@ Batrade has no distribution-specific code. It only shells out to `iproute2` (`ip
 | openSUSE | Leap, Tumbleweed, SLES | `zypper` | `nmap arp-scan iproute2 python3 python3-PyYAML python3-Flask python3-requests python3-defusedxml python3-scapy` |
 | Alpine | Alpine (edge) | `apk` | `nmap arp-scan iproute2 python3 py3-yaml py3-flask py3-requests py3-defusedxml py3-scapy` |
 
-Requirements:
-
-- Python 3.11 or later
-- Linux with `nmap` and `iproute2` (`ip` ships with every desktop/server distribution)
-- `arp-scan` for full live mode (optional — the sensor degrades gracefully without it)
-- Python packages: `PyYAML`, `Flask`, `requests`, `defusedxml`, `scapy`
-
-Python packages can come from the distribution or from a virtualenv. On distributions that mark the system interpreter as externally managed (PEP 668: Fedora, recent Debian/Ubuntu, Arch), use the `--venv` installer flag.
-
 ## Installation
 
+### From the repository
+
 ```bash
-bash install.sh                  # checks the environment and initializes the database
+bash install.sh                  # environment check + database (system Python)
+bash install.sh --venv --link    # recommended for development: .venv + `batrade` in ~/.local/bin
 bash install.sh --install-deps   # also installs nmap/arp-scan/iproute2 with the detected manager
-bash install.sh --venv           # creates .venv and installs the project there
 bash install.sh --systemd        # installs the systemd units (root required)
-bash install.sh --venv --link    # also links `batrade` into ~/.local/bin (or /usr/local/bin)
 ```
 
-### System-wide installation
-
-For a real machine or VM, one command installs Batrade under `/opt/batrade` and leaves
-`batrade` in `PATH` (`/usr/local/bin/batrade`, a wrapper that pins `BATRADE_ROOT` so the
-command works from any directory):
-
-```bash
-sudo bash install.sh --system                      # install to /opt/batrade
-sudo bash install.sh --system --install-deps --start   # + system packages + start sensor and panel
-sudo bash install.sh --system --prefix /srv/batrade --dry-run   # show the plan, change nothing
-sudo bash install.sh --uninstall                   # remove code and command, keep var/, .env, config.yaml
-sudo bash install.sh --uninstall --purge --yes     # also delete data and configuration
-```
-
-It must run as root (otherwise it tells you to use `sudo`). The steps are the same ones
-listed below, plus: it copies the repository **without** `.git`, `var/`, `.venv` or
-`.env`, creating the virtualenv inside the prefix; and it reuses an existing
-`config.yaml`, `.env` and `var/` on reinstall, so an update never overwrites the
-operator's configuration or data. `--start` launches sensor and dashboard at the end.
-`--uninstall` refuses to run while a CLI-managed component is alive.
-
-The installer:
+The repository installer:
 
 1. detects the distribution and package manager (apt, dnf, pacman, zypper, apk);
 2. reports missing system tools and, with `--install-deps`, installs them;
 3. verifies the Python modules (system interpreter or `.venv`);
-4. creates `var/`, `.env` (mode 600) and the SQLite database;
-5. lists the detected network interfaces and runs `doctor`.
+4. creates `var/` and `.env` (mode 600) when missing and leaves `config.yaml` untouched;
+5. initializes the database, lists the interfaces and runs `doctor`.
 
-Manual installation is equivalent:
+`--link` warns when the target directory is not in `PATH`. Re-running the installer is safe: it never replaces the database, the configuration or the secrets file.
+
+### System-wide installation (machines and VMs)
 
 ```bash
-# Debian / Ubuntu / Kali / Parrot
-sudo apt install -y nmap arp-scan iproute2 python3 python3-venv python3-yaml python3-flask python3-requests python3-defusedxml python3-scapy
+sudo bash install.sh --system                          # install to /opt/batrade
+sudo bash install.sh --system --install-deps --start   # + system packages, then start sensor and panel
+sudo bash install.sh --system --prefix /srv/batrade --dry-run   # show the plan, change nothing
+sudo bash install.sh --uninstall                       # remove code and command, keep var/, .env, config.yaml
+sudo bash install.sh --uninstall --purge --yes         # also delete data and configuration
+```
 
-# Fedora / RHEL / Rocky / Alma
-sudo dnf install -y nmap arp-scan iproute python3 python3-pyyaml python3-flask python3-requests python3-defusedxml python3-scapy
+- Runs as root; otherwise it tells you to use `sudo`.
+- Copies the repository **without** `.git`, `var/`, `.venv`, `.env` or build cruft, creates the virtualenv inside the prefix and installs the package there.
+- Writes `/usr/local/bin/batrade` as a small wrapper that pins `BATRADE_ROOT` to the prefix and execs the venv binary, so `batrade` works from any directory. It warns if that directory is not in `PATH` (sudo commonly uses `secure_path`).
+- **Upgrades preserve state**: an existing `config.yaml`, `.env` and `var/` are reused, never overwritten.
+- `--dry-run` prints every step and changes nothing. `--start` launches sensor and dashboard at the end.
+- `--uninstall` refuses while a CLI-managed component is alive, removes the wrapper and the code, and keeps `var/`, `.env` and `config.yaml`; `--purge` deletes those too after asking you to type `BORRAR` (`--yes` skips the prompt).
 
-# Arch / BlackArch
-sudo pacman -S --needed nmap arp-scan iproute2 python python-pyyaml python-flask python-requests python-defusedxml python-scapy
+### Manual installation
 
-# openSUSE
-sudo zypper install nmap arp-scan iproute2 python3 python3-PyYAML python3-Flask python3-requests python3-defusedxml python3-scapy
+Install the system packages from the table above, then:
 
-# Python (cualquier distribución, aislado del sistema)
+```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
+python3 -m batrade init
 ```
+
+## Quick start
+
+This section assumes `batrade` is in `PATH` (from `--link` or `--system`); otherwise use `.venv/bin/batrade` or `python3 -m batrade`.
+
+**1. Check what will be monitored.**
+
+```bash
+batrade interfaces
+batrade doctor
+```
+
+`interfaces` lists every IPv4 interface with its kind (Ethernet, Wi-Fi, loopback), address and whether it carries the default route. `doctor` shows the interface, subnet, gateway, effective mode, effective user, schema version, heartbeat age and a "prueba en VM" block. `batrade init` is safe to repeat.
+
+**2. Start both components in the background.**
+
+```bash
+batrade start
+batrade status
+```
+
+`start` launches the sensor and the dashboard detached, with PID files in `var/` and logs in `var/log/`. `status` prints both PIDs, the heartbeat age, the effective user and mode, and the panel URL. Open **http://127.0.0.1:8000**:
+
+| Route | Content |
+|---|---|
+| `/` | Summary: devices online, unknown/unauthorized, alerts today, latest events |
+| `/devices` | Inventory with trust state, vendor, hostname, last seen |
+| `/events` | Alert history with severity, verification state and false-positive marking |
+| `/health` | Heartbeat, capabilities, mode, interface/subnet, tool status, UDP coverage |
+| `/learning` | Baseline review and `approve-baseline` button |
+
+Check it without a browser:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/health
+```
+
+Stop or restart with `batrade stop` / `batrade restart`. Use `--only sensor` or `--only dashboard` to control one component, and `start --mode degraded` to force a sensor mode. If a component dies immediately (for example because port 8000 is taken), `start` prints the last lines of its log.
+
+**3. Run in the foreground (optional).** Use two terminals; Ctrl+C stops each component.
+
+```bash
+batrade sensor       # prints the selected mode and interface
+batrade dashboard    # http://127.0.0.1:8000
+```
+
+`auto` uses `live` when `CAP_NET_RAW` and `arp-scan` are available, otherwise `degraded` (netlink neighbor table + nmap TCP connect). The dashboard listens only on loopback by default; use `--host` / `--port` to change it, and exposing it beyond loopback requires `DASHBOARD_TOKEN` in `.env` (configuration validation refuses to start otherwise).
+
+Logs live in `var/log/`: `sensor.out` / `dashboard.out` (console copy) and `batrade.log` (JSONL, rotated). Alerts append to `var/alerts.log` when the local channel is enabled and the event is warn/crit.
+
+**4. Try the demo without any privileges** (does not touch the network). Stop the sensor first because it shares the database:
+
+```bash
+batrade stop
+batrade demo
+batrade dashboard
+```
+
+`demo` seeds the database with synthetic detection scenarios. See *Resetting the database* to clean it up afterwards.
+
+**What to expect on first run:** devices appear in `/devices` after the first sweep (immediately at startup, then every 30 s by default), new-device events are `info` while learning mode is active, and alerts only start once a `warn`/`crit` pattern is detected. Review the inventory and run `batrade approve-baseline` to end learning mode.
 
 ## Network auto-detection (Ethernet and Wi-Fi)
 
@@ -137,92 +187,19 @@ network:
 
 For example, `interface: wlp2s0` monitors the wireless LAN even when Ethernet carries the default route; use the wired name (`eth0`, `enp3s0`, `eno1`) when the cable is the network under watch.
 
-Wi-Fi works for discovery and netlink monitoring, but a managed-mode card cannot capture other clients' unicast traffic. Passive sniffing only sees the sensor's own traffic and broadcast/multicast frames; use a wired port mirror or a monitor-mode interface when full packet visibility is required. `doctor` prints a warning when the selected interface is wireless.
-
-## Quick start
-
-Install once with the virtualenv and the PATH link:
-
-```bash
-bash install.sh --venv --link
-```
-
-This creates `.venv`, installs the package, initializes the database and links `batrade` into `~/.local/bin` (the installer warns if that directory is not in `PATH`). The rest of this section uses plain `batrade`. Without `--link`, activate the environment (`source .venv/bin/activate`) or use `.venv/bin/batrade`; `python3 -m batrade` is equivalent.
-
-**1. Check what will be monitored.**
-
-```bash
-batrade interfaces
-batrade doctor
-```
-
-`interfaces` lists every IPv4 interface with its kind (Ethernet, Wi-Fi, loopback), address and whether it carries the default route. `doctor` shows the interface, subnet, gateway and sensor mode. The installer already initialized the database; `batrade init` is safe to repeat if needed.
-
-**2. Start both components in the background.**
-
-```bash
-batrade start
-batrade status
-```
-
-`start` launches the sensor and the dashboard detached, with PID files in `var/` and logs in `var/log/`. `status` prints both PIDs, the sensor heartbeat age and the panel URL. Open **http://127.0.0.1:8000**:
-
-| Route | Content |
-|---|---|
-| `/` | Summary: devices online, unknown/unauthorized, alerts today, latest events |
-| `/devices` | Inventory with trust state, vendor, hostname, last seen |
-| `/events` | Alert history with severity and false-positive marking |
-| `/health` | Sensor heartbeat, capabilities, interface/subnet, tool status |
-| `/learning` | Baseline review and `approve-baseline` button |
-
-Check it without a browser:
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/health
-```
-
-Stop or restart with `batrade stop` / `batrade restart`. Use `--only sensor` or `--only dashboard` to control one component, and `start --mode degraded` to force a sensor mode. If a component dies immediately (for example because port 8000 is taken), `start` prints the last lines of its log.
-
-**3. Run in the foreground (optional).** Use two terminals; Ctrl+C stops each component.
-
-```bash
-batrade sensor       # prints the selected mode and interface
-batrade dashboard    # http://127.0.0.1:8000
-```
-
-`auto` uses `live` when `CAP_NET_RAW` and `arp-scan` are available, otherwise `degraded` (netlink neighbor table + nmap TCP connect). The dashboard listens only on loopback by default; use `--host` / `--port` to change it, and exposing it beyond loopback requires `DASHBOARD_TOKEN` in `.env` (configuration validation refuses to start otherwise).
-
-Logs live in `var/log/`: `sensor.out` / `dashboard.out` (console copy) and `batrade.log` (JSONL, rotated). Alerts append to `var/alerts.log` when the local channel is enabled and the event is warn/crit.
-
-**4. Try the demo without any privileges** (does not touch the network). Stop the sensor first if it shares the same database:
-
-```bash
-batrade stop
-batrade demo
-batrade dashboard
-```
-
-`demo` seeds the database with synthetic detection scenarios so the dashboard shows realistic data without requiring network access.
-
-**What to expect on first run:** devices appear in `/devices` after the first sweep (immediately at startup, then every 30 s by default), new-device events are `info` while learning mode is active, and alerts only start once a `warn`/`crit` pattern is detected. Review the inventory and run `batrade approve-baseline` to end learning mode.
+Wi-Fi works for discovery and netlink monitoring, but a managed-mode card cannot capture other clients' unicast traffic. Passive sniffing only sees the sensor's own traffic and broadcast/multicast frames; use a wired port mirror or a monitor-mode interface when full packet visibility is required. `doctor` warns when the selected interface is wireless or looks like a hypervisor NIC.
 
 ## Sensor modes
 
 | Mode | Requires | Description |
 |---|---|---|
-| `live` | `CAP_NET_RAW`, `arp-scan` | Passive packet sniffing + active ARP sweep |
-| `degraded` | nothing extra | Netlink neighbor table + nmap TCP connect scan |
+| `live` | `CAP_NET_RAW`, `arp-scan` | Passive packet sniffing + active ARP sweep + UDP pass |
+| `degraded` | nothing extra | Netlink neighbor table + nmap TCP connect scan (no UDP pass) |
 | `replay` | `scapy` | Feeds the detection engine from a recorded `.pcap` file |
 | `simulate` | `scapy` | Feeds the engine with built-in synthetic scenarios |
-| `auto` | - | Picks `live` or `degraded` based on available capabilities |
+| `auto` | — | Picks `live` or `degraded` based on available capabilities |
 
-Check what mode will be used and why:
-
-```bash
-batrade doctor
-```
-
-## Port scans, UDP coverage and scheduling
+## Port scanning, UDP and scheduling
 
 `scan` in `config.yaml` controls both what nmap does and when it runs:
 
@@ -233,13 +210,14 @@ batrade doctor
 | `timing` | `-T3` | nmap timing template |
 | `standard_timeout` | `300` | Process timeout of the `standard` profile (capped at 300 s) |
 | `quick_timeout` | `120` | Process timeout of the `quick` profile |
+| `udp_timeout` | `60` | `--host-timeout` of the UDP pass (minimum 5); the nmap process gets this plus 30 s |
 | `quick_periodic_hours` | `24` | A device whose last scan is older than this gets a `quick` rescan |
 | `weekly_rescan_days` | `7` | Trusted (`confiable`) devices get a new `standard` scan after this many days (RF-10) |
 | `risky_ports` | 10-port catalogue | `{port, protocol, service, reason}`; `protocol` is mandatory |
 
 Scheduling happens after each sweep: a device seen for the first time gets a `standard` scan; an overdue trusted device gets a new `standard`; anything else overdue gets a `quick`. Weekly rescans are staggered — at most `max_concurrent` per sweep, oldest first — so a network that was offline for a week does not fire a burst of nmap processes. In-flight jobs are coalesced by `(address, profile)`, and the same pair requested from the dashboard cannot be queued twice.
 
-UDP ports of the catalogue are scanned with a second, tightly bounded nmap pass (`-sU -sV --version-light -p U:<catalogue> --host-timeout <scan.udp_timeout>s --max-retries 1`) only when the sensor has `CAP_NET_RAW`. Version detection is what turns an `open|filtered` into `open` when the service answers the probe; only ports reported `open` are stored, because `open|filtered` is the normal outcome for UDP without a reply and would produce false positives. Without raw capture the pass is skipped, the sensor logs the limitation once per scan, and `/health` shows *"UDP no verificable sin CAP_NET_RAW"*. A protocol that was not scanned never marks its known ports as closed.
+**UDP pass.** The catalogue's UDP ports are scanned with a second, tightly bounded nmap invocation (`-sU -sV --version-light -p U:<catalogue> --host-timeout <scan.udp_timeout>s --max-retries 1`) only when the sensor has `CAP_NET_RAW`. Version detection is what turns an `open|filtered` into `open` when the service answers the probe; only ports reported `open` are stored, because `open|filtered` is the normal outcome for UDP without a reply and would produce false positives. Without raw capture the pass is skipped, the sensor logs the limitation once per scan, and `/health` shows *"UDP no verificable sin CAP_NET_RAW"*. A protocol that was not scanned never marks its known ports as closed.
 
 **Closing ports is a claim, and only `standard`/`vuln` may make it.** `quick` (`-F`) covers roughly the top 100 TCP ports, so its silence about everything else proves nothing: it only opens and updates ports. A port that really disappears is marked `closed` by the next `standard` scan, and if it later comes back, that reappearance is reported again as `port_new` (and `port_risky` for catalogue ports) because a service that returns is news. The trade-off: a genuine closure can take until the next `standard` scan (weekly by default) to be reflected in the panel.
 
@@ -249,12 +227,9 @@ This cannot be automated in the test suite: it needs `CAP_NET_RAW`, nmap probing
 
 1. Confirm the sensor really has raw capture: `batrade doctor` must print `CAP_NET_RAW : sí` and `modo … efectivo: live`.
 2. Make sure ports `1900` and `5353` (UDP) are in `scan.risky_ports` — the default catalogue includes both.
-3. Trigger a `standard` scan of that device: dashboard → device detail → *Escaneo manual* → `standard`, or
-   `sudo batrade sensor --mode live` and wait for the first sweep.
-4. Expected result: in `/events` a `port_risky` (warn) event for that device mentioning `1900/udp` (UPnP/SSDP) or `5353/udp` (mDNS), and the port listed in the device detail with protocol `udp`. The scan row in `/health`/device detail shows the run finishing normally.
-5. If you only see the pass timing out, raise `scan.udp_timeout` (default 60 s) and retry. If nmap still reports `open|filtered` for a device you know is answering, that is expected for services that ignore version probes; Batrade deliberately does not turn `open|filtered` into an event.
-
-Record the outcome in the VM test notes: *real UDP validation pending in VM* until you run it.
+3. Trigger a `standard` scan of that device: dashboard → device detail → *Escaneo manual* → `standard`, or `sudo batrade sensor --mode live` and wait for the first sweep.
+4. Expected result: a `port_risky` (warn) event in `/events` for that device mentioning `1900/udp` (UPnP/SSDP) or `5353/udp` (mDNS), and the port listed in the device detail with protocol `udp`.
+5. If the pass only times out, raise `scan.udp_timeout` and retry. If nmap still reports `open|filtered` for a device you know is answering, that is expected for services that ignore version probes; Batrade deliberately does not turn `open|filtered` into an event.
 
 ## Data retention
 
@@ -269,9 +244,32 @@ Pending notifications are never removed: a network outage must not lose alerts. 
 
 ## Database schema and migrations
 
-The schema is versioned with `PRAGMA user_version` and an ordered `MIGRATIONS` list in `batrade/db.py`. `SCHEMA_VERSION` is derived from that list, so there is a single source of truth. On startup (`init`, `doctor`, sensor, dashboard) only the pending migrations are applied, each one in its own transaction together with the version bump: a migration that fails leaves the schema and the version untouched. Migrations are additive and idempotent (`CREATE ... IF NOT EXISTS`, guarded `ALTER TABLE ADD COLUMN`).
+The schema is versioned with `PRAGMA user_version` and an ordered `MIGRATIONS` list in `batrade/db.py`. `SCHEMA_VERSION` is derived from that list, so there is a single source of truth (currently v2). On startup (`init`, `doctor`, sensor, dashboard) only the pending migrations are applied, each one in its own transaction together with the version bump: a migration that fails leaves the schema and the version untouched. Migrations are additive and idempotent.
 
 Before migrating an existing database with data, a backup is written next to it as `<db>.bak-v<N>` with mode `600`; an existing backup is never overwritten (`-2`, `-3`, … are appended). A brand-new database receives every migration and ends at the latest version. `batrade init` and `batrade doctor` print the schema version actually stored in the file.
+
+## Resetting the database
+
+`demo`, `replay` and `simulate` write real rows into the same database as the live sensor, so after a test session the inventory and events are polluted. `reset-db` cleans them:
+
+```bash
+sudo batrade stop                      # the sensor must not be running
+sudo batrade reset-db                  # asks you to type REINICIAR
+sudo batrade reset-db --yes            # non-interactive
+sudo batrade reset-db --keep-devices   # keep inventory, wipe events/ports/scans
+sudo batrade reset-db --keep-logs      # keep scan XML and var/alerts.log
+sudo batrade reset-db --no-backup      # skip the safety copy
+```
+
+- **Root only.** The command checks `geteuid() == 0` and refuses otherwise; it does not implement its own password.
+- **Sensor stopped.** If a CLI-managed sensor or `batrade-sensor.service` is running it refuses and tells you to stop it first (it never stops it for you).
+- **Confirmation.** Without `--yes` it prints what will be deleted (path, size, row counts) and requires typing `REINICIAR`; without a TTY it aborts.
+- **Backup by default.** `<db>.bak-reset-<epoch_ms>` with mode 600, created with SQLite's backup API and never overwritten.
+- **Scope.** By default every data table is emptied (inventory, history, ports, scans, events, queue, requests, heartbeat, tool status, baseline) and `init` runs again: learning mode back on, no baseline. `--keep-devices` keeps inventory, history and baseline and only clears events/ports/scans/queue/requests/tool status.
+- **Artifacts.** Scan XML under `paths.scans_dir` and `var/alerts.log` are cleared too (path containment enforced; symlinks and files outside the directory are ignored).
+- **Audit.** The operation is logged in `var/log/batrade.log` with scope, row counts and the invoking user (`SUDO_USER`), never inventory contents.
+
+Exit codes: `0` done, `1` refused or cancelled, `2` invalid arguments or configuration. The reset is **never** exposed in the dashboard and never runs automatically.
 
 ## CLI reference
 
@@ -295,17 +293,17 @@ Commands:
 
 Global options:
   --config FILE     Path to config.yaml (default: config.yaml)
-  --root DIR        Project root (default: current directory)
+  --root DIR        Project root (default: BATRADE_ROOT, else the installed package)
   --version         Print version and exit
 ```
 
-The installer links this console script into `PATH` (`--link`); without it, use `.venv/bin/batrade` or `python3 -m batrade`.
+The root is resolved as `--root` > `BATRADE_ROOT` > the directory of the installed package, so the command works from any working directory. `--system` installs the wrapper in `/usr/local/bin`; `--venv --link` links the venv script into `~/.local/bin`; otherwise use `.venv/bin/batrade` or `python3 -m batrade`.
 
 ## Alerts
 
 The sensor supports three notification channels, configured under `notify.channels` in `config.yaml`:
 
-- `local` — always active; appends plain-text alerts to `var/alerts.log`
+- `local` — enabled by default; appends plain-text alerts to `var/alerts.log`
 - `telegram` — sends a message to a Telegram chat; requires `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`
 - `discord` — posts to a Discord webhook; requires `DISCORD_WEBHOOK` in `.env`
 
@@ -316,78 +314,24 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-## Resetting the database
+Every alert answers *what happened / why it matters / what to do*, plus event, time, source/destination and accumulated repetitions. A failed delivery never loses the event: it stays queued with backoff and visible in the panel.
 
-`demo`, `replay` and `simulate` write real rows into the same database as the live sensor, so
-after a test session the inventory and events are polluted. `reset-db` cleans them:
+## Production deployment (systemd)
 
-```bash
-sudo batrade stop                 # the sensor must not be running
-sudo batrade reset-db             # asks you to type REINICIAR
-sudo batrade reset-db --yes       # non-interactive
-sudo batrade reset-db --keep-devices   # keep inventory, wipe events/ports/scans
-sudo batrade reset-db --keep-logs      # keep scan XML and var/alerts.log
-sudo batrade reset-db --no-backup      # skip the safety copy
-```
+The `deploy/` directory contains two unit files:
 
-- **Root only.** The command checks `geteuid() == 0` and refuses otherwise; it does not
-  implement its own password.
-- **Sensor stopped.** If a CLI-managed sensor or `batrade-sensor.service` is running it
-  refuses and tells you to stop it first (it never stops it for you).
-- **Confirmation.** Without `--yes` it prints what will be deleted (path, size, row counts)
-  and requires typing `REINICIAR`; without a TTY it aborts.
-- **Backup by default.** `<db>.bak-reset-<epoch_ms>` with mode 600, created with SQLite's
-  backup API and never overwritten.
-- **Scope.** By default every data table is emptied (inventory, history, ports, scans,
-  events, queue, requests, heartbeat, tool status, baseline) and `init` runs again: learning
-  mode back on, no baseline. `--keep-devices` keeps inventory, history and baseline and only
-  clears events/ports/scans/queue/requests/tool status.
-- **Artifacts.** Scan XML under `paths.scans_dir` and `var/alerts.log` are cleared too
-  (path containment enforced, symlinks and files outside the directory are ignored).
-- **Audit.** The operation is logged in `var/log/batrade.log` with scope, row counts and the
-  invoking user (`SUDO_USER`), never inventory contents.
-
-Exit codes: `0` done, `1` refused or cancelled, `2` invalid arguments or configuration.
-The reset is **never** exposed in the dashboard and never runs automatically.
-
-## Production deployment
-
-The `deploy/` directory contains two systemd unit files:
-
-- `batrade-sensor.service` — runs the sensor daemon with `CAP_NET_RAW` and `CAP_NET_ADMIN`
+- `batrade-sensor.service` — runs the sensor with `CAP_NET_RAW` and `CAP_NET_ADMIN`
 - `batrade-dashboard.service` — serves the Flask dashboard
 
-Install them with:
-
 ```bash
-sudo bash install.sh --systemd
+sudo bash install.sh --systemd      # from the repository; rewrites paths and ExecStart
 ```
 
-The installer rewrites `WorkingDirectory`, `ReadWritePaths` and `ExecStart` for the real install path and the Python being used (system or `.venv`). It also creates the `batrade` service user when missing and gives it ownership of `var/`. The recommended install path is `/opt/batrade`; systemd hardening sets `ProtectHome=true`, so a project under `/home` cannot be used by the service — with the repository in your home directory, use `batrade start` / `batrade stop` (or move it to `/opt/batrade`) instead of installing the units.
+The installer rewrites `WorkingDirectory`, `ReadWritePaths` and `ExecStart` for the real install path and Python, creates the `batrade` service user when missing, and gives it ownership of `var/`. It does **not** enable the units; do that with `systemctl enable --now batrade-sensor batrade-dashboard`.
 
-If the dashboard is exposed beyond loopback, set `DASHBOARD_TOKEN` in `.env` to require token authentication.
+`ProtectHome=true` is part of the hardening, so a unit cannot read a project under `/home`: keep the installation outside your home (for example `/opt/batrade`, where `--system` puts it) or use the CLI instead. `--system` alone does not install the units; run `--systemd` afterwards from the installed prefix if you want the service.
 
-**Pick one control plane per installation.** If `batrade-sensor.service` (or the dashboard unit) is active, `batrade start` and `batrade restart` refuse to run and tell you to use `systemctl` or stop the unit first: two sensors over the same database would mean two writers. `batrade status` and `batrade doctor` show the effective user, the real mode and, when `CAP_NET_RAW` is missing, the hint to run with `sudo` for `live`.
-
-For a first real test on a VM the simplest setup is **CLI as root and no systemd**:
-
-```bash
-sudo batrade start          # starts sensor + dashboard with root privileges
-sudo batrade status
-sudo batrade stop
-```
-
-When you later move to systemd, stop the CLI-managed components first (or use `--system` on a prefix outside `/home`), because `ProtectHome=true` prevents reading a project under your home directory.
-
-## Troubleshooting
-
-- **`network.interface inexistente`** — run `batrade interfaces` and copy a real name, or leave `interface: auto`.
-- **No detection at all** — run `batrade doctor`: without `CAP_NET_RAW` the passive sniffer and `arp-scan` are unavailable, so the sensor runs in `degraded` mode. For full mode grant the capability (the systemd unit does) or run as root in a lab VM.
-- **Wi-Fi sees little traffic** — expected in managed mode; see the Wi-Fi note above.
-- **`externally-managed-environment` from pip** — use `bash install.sh --venv` or `pip install --user`.
-- **Fedora/RHEL with SELinux** — a custom unit runs unconfined by default; if you add a policy, allow read access to the install path and write access to `var/`.
-- **No vendor names** — Batrade uses a local OUI file and falls back across the usual nmap, arp-scan and Wireshark locations. Install `nmap` or `arp-scan` to populate it; vendor names are cosmetic.
-- **Dashboard shows a stale gateway** — the sensor stores the learned gateway in `network_baseline`; rerun `batrade init` after changing networks.
+**Pick one control plane per installation.** If `batrade-sensor.service` (or the dashboard unit) is active, `batrade start` and `batrade restart` refuse to run and tell you to use `systemctl` or stop the unit first: two sensors over the same database would mean two writers. `status` and `doctor` show the effective user, the real mode and, when `CAP_NET_RAW` is missing, the hint to run with `sudo` for `live`.
 
 ## Real test on a VM
 
@@ -395,77 +339,54 @@ This is the recommended path for a first real run.
 
 **VM requirements**
 
-- Any modern Linux (Debian/Ubuntu/Kali, Fedora, Arch, openSUSE, Alpine) with Python ≥ 3.11.
-- A second network adapter in **bridged** mode on the LAN you want to watch, or the host's
-  physical adapter passed through. NAT works but limits visibility: the VM only sees its
-  own traffic, so ARP spoofing aimed at other hosts and most broadcasts are invisible.
-- Allow **promiscuous mode** on the virtual switch/hypervisor if it offers that option
-  (VirtualBox: *Promiscuous Mode: Allow All*; VMware: *Promiscuous*); without it the vNIC
-  drops frames not addressed to it.
+- Any modern Linux from the table above with Python ≥ 3.11.
+- A second network adapter in **bridged** mode on the LAN you want to watch, or the host's physical adapter passed through. NAT works but limits visibility: the VM only sees its own traffic, so ARP spoofing aimed at other hosts and most broadcasts are invisible.
+- Allow **promiscuous mode** on the virtual switch if it offers that option (VirtualBox: *Promiscuous Mode: Allow All*; VMware: *Promiscuous*); without it the vNIC drops frames not addressed to it.
 - 1 vCPU and 512 MB are enough; 2 GB leaves room for `vuln` scans.
 - Root or `sudo` inside the VM (needed for `CAP_NET_RAW`, i.e. live mode).
 
-**Install in one command**
+**Install and check**
 
 ```bash
 sudo bash install.sh --system --install-deps --start
+batrade status
+batrade doctor          # expects "efectivo: live" and CAP_NET_RAW: sí
+batrade interfaces
+curl -s http://127.0.0.1:8000/health
 ```
 
-That installs to `/opt/batrade`, links `batrade` into `/usr/local/bin`, installs nmap/arp-scan
-and starts the sensor and the dashboard. If you prefer the repository in place, use
-`sudo batrade start` from the repo instead (see *Pick one control plane* above).
-
-**Check that it is really watching**
-
-```bash
-batrade status            # sensor/dashboard PIDs, heartbeat age, user, effective mode
-batrade doctor            # CAP_NET_RAW sí/no, interface, mode, "Prueba en VM" block
-batrade interfaces        # which NIC carries the default route, MAC and kind
-curl -s http://127.0.0.1:8000/health   # capabilities, mode, tool status, UDP coverage
-```
-
-`doctor` must report `modo … efectivo: live` and `CAP_NET_RAW: sí` for full coverage. If it
-says `degraded`, the sensor still works (netlink + TCP connect scans) but does not capture
-packets or scan UDP; run it with `sudo`.
+If `doctor` says `degraded`, the sensor still works (netlink + TCP connect scans) but does not capture packets or scan UDP; run it with `sudo`. With the repository in place and no systemd, `sudo batrade start` is the simplest control plane.
 
 **First-use flow**
 
 1. Let it sweep for a few minutes and open `http://<vm>:8000/devices`.
 2. Review the inventory while learning mode is active (new devices are `info`, not alerted).
-3. Annotate what you recognize (alias + trust state) and check `/learning` for candidates
-   with random MACs.
-4. Run `sudo batrade approve-baseline` once the inventory is complete: from then on new or
-   unauthorized devices alert normally.
+3. Annotate what you recognize (alias + trust state) and check `/learning` for candidates with random MACs.
+4. Run `sudo batrade approve-baseline` once the inventory is complete: from then on new or unauthorized devices alert normally.
 
-**Exercising detections without an attack**
+**Demo, cleanup and UDP check**
 
 ```bash
-batrade stop                 # the demo writes to the same database
-batrade demo                 # seeds synthetic scenarios (mixed, router_reboot)
-batrade dashboard            # inspect /events and /devices
-```
-
-Then clean up what the demo wrote:
-
-```bash
+batrade stop && batrade demo && batrade dashboard   # inspect /events and /devices
 batrade stop
-sudo batrade reset-db --yes              # full wipe + restart of the learning baseline
-sudo batrade reset-db --keep-devices     # keep the inventory, drop simulated events
+sudo batrade reset-db --yes                          # full wipe + restart of the baseline
+sudo batrade reset-db --keep-devices                 # keep inventory, drop simulated events
 ```
 
-**Verify UDP by hand**
+Then run the manual UDP check described in *Verifying UDP detection by hand*. This is the one check the automated suite cannot do for you. To remove the installation, see *System-wide installation* (`--uninstall`, `--purge`).
 
-Follow *Verifying UDP detection by hand* above: with `CAP_NET_RAW` and a device answering
-SSDP or mDNS you should see a `port_risky` event for `1900/udp` or `5353/udp`. This is the one
-check the automated suite cannot do for you.
+## Troubleshooting
 
-**Uninstall**
-
-```bash
-sudo batrade stop
-sudo bash install.sh --uninstall          # removes code and command, keeps var/, .env, config.yaml
-sudo bash install.sh --uninstall --purge --yes   # removes data and configuration too
-```
+- **`network.interface inexistente`** — run `batrade interfaces` and copy a real name, or leave `interface: auto`.
+- **No detection at all** — run `batrade doctor`: without `CAP_NET_RAW` the passive sniffer, `arp-scan` and the UDP pass are unavailable, so the sensor runs in `degraded` mode. For full mode grant the capability (the systemd unit does) or run as root.
+- **`start` refuses with a systemctl message** — the systemd unit is active. Use `sudo systemctl restart batrade-sensor` or stop the unit before using the CLI.
+- **`reset-db` refuses** — it needs root and a stopped sensor; stop it with `batrade stop` or `systemctl stop`, and rerun with `sudo`.
+- **`batrade: command not found` after `--system`** — `/usr/local/bin` is not in `PATH` (sudo often uses `secure_path`); call `/usr/local/bin/batrade` or fix `PATH`.
+- **Wi-Fi sees little traffic** — expected in managed mode; see the Wi-Fi note above.
+- **`externally-managed-environment` from pip** — use `bash install.sh --venv` or `pip install --user`.
+- **Fedora/RHEL with SELinux** — a custom unit runs unconfined by default; if you add a policy, allow read access to the install path and write access to `var/`.
+- **No vendor names** — Batrade uses a local OUI file and falls back across the usual nmap, arp-scan and Wireshark locations. Install `nmap` or `arp-scan` to populate it; vendor names are cosmetic.
+- **Dashboard shows a stale gateway** — the sensor stores the learned gateway in `network_baseline`; rerun `batrade init` after changing networks.
 
 ## Running tests
 
@@ -474,21 +395,23 @@ pip install -e ".[dev]"    # pytest; on distribution-managed systems use a venv
 python3 -m pytest
 ```
 
-Tests cover the detection engine, detection rules, inventory logic, notification queue, database store, dashboard routes, configuration loading, interface auto-detection, schema migrations, scan scheduling, UDP parsing and retention. They run entirely offline and without privileges, using synthetic observations and the fixtures in `fixtures/pcaps/` and `fixtures/nmap/`. CI runs the suite on Python 3.11, 3.12 and 3.13 (`.github/workflows/tests.yml`).
+Tests cover the detection engine, rules, inventory, notification queue, store, dashboard routes, configuration, interface auto-detection, migrations, scan scheduling and close policy, UDP parsing, ARP verification, retention, `reset-db`, the installer and project metadata. They run entirely offline and without privileges, using synthetic observations and the fixtures in `fixtures/pcaps/` and `fixtures/nmap/`. CI runs the suite on Python 3.11, 3.12 and 3.13 (`.github/workflows/tests.yml`).
 
 ## Project layout
 
 ```
 batrade/           Python package
-  cli.py           Entry point and subcommand handlers
-  daemon.py        Background start/stop/status of sensor and dashboard
+  cli.py           Entry point, subcommands and root resolution
+  daemon.py        Background start/stop/status; systemd guard
   sensor.py        Monitoring daemon (multi-threaded)
   inventory.py     Device tracking and trust management
   notify.py        Alert dispatch with retry and deduplication
-  db.py            SQLite schema, versioned migrations and connections
-  store.py         Data access layer
+  db.py            Schema, versioned migrations, backups and connections
+  store.py         Data access layer (all SQL)
   config.py        Configuration loading and validation
   events.py        Finding persistence helpers
+  demo.py          Demo data seeding
+  logging_setup.py JSONL logging with rotation
   detect/          Detection subsystem
     engine.py      Rule orchestration and throttling
     rules.py       Stateless detection rules
@@ -500,7 +423,7 @@ batrade/           Python package
     caps.py        Capability detection and mode resolution
     ifaces.py      IPv4 interface discovery (Ethernet/Wi-Fi) and selection
     discovery.py   Host sweep (arp-scan / netlink fallback)
-    nmap_scan.py   Port scanning wrapper
+    nmap_scan.py   Port scanning wrapper (TCP and UDP passes)
     neigh.py       Netlink neighbor table reader
     verify.py      Active ARP binding verification
     oui.py         OUI vendor lookup (multi-distro paths)
@@ -509,16 +432,18 @@ batrade/           Python package
     app.py         Routes and view logic
     templates/     Jinja2 HTML templates
     static/        CSS
-deploy/            Systemd service units
-fixtures/pcaps/    Recorded network captures for tests
-fixtures/nmap/     Synthetic nmap XML fixtures (UDP pass)
-scripts/           Development utilities
-tests/             pytest test suite
+deploy/            systemd units
+fixtures/pcaps/    Recorded captures for tests
+fixtures/nmap/     Synthetic nmap XML fixtures (UDP pass and version detection)
+scripts/           make_fixtures.py (regenerate captures), sync_tree.sh (installer copy)
+tests/             pytest suite
+.github/           CI workflow (3.11 / 3.12 / 3.13)
 config.yaml        Main configuration
-install.sh         Multi-distro installer and environment check
-.env.example       Secret variable template
+install.sh         Multi-distro installer (repository, --system, --uninstall)
+.env.example       Secret variable names (values go only in .env)
+REPORTE_*.md       Change reports (sanitization, install/VM)
 ```
 
 ## License
 
-See [LICENSE](LICENSE) if present, or contact the author.
+No license file is included yet: choosing one is a pending decision of the project owner. Until then, treat the code as all rights reserved.
