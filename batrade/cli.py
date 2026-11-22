@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime
@@ -31,7 +32,8 @@ log = logging.getLogger("batrade.cli")
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="batrade", description="Batrade Home-SOC")
     p.add_argument("--config", default="config.yaml", help="ruta de config.yaml")
-    p.add_argument("--root", default=None, help="raíz del proyecto (por defecto cwd)")
+    p.add_argument("--root", default=None,
+                   help="raíz del proyecto (por defecto BATRADE_ROOT o el paquete instalado)")
     p.add_argument("--version", action="version", version=f"Batrade {__version__}")
     # Permite escribir `batrade sensor --config ...` además de `batrade --config ... sensor`.
     common = argparse.ArgumentParser(add_help=False)
@@ -90,11 +92,31 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+def package_root() -> Path:
+    """Directorio que contiene el paquete (la raíz de una instalación normal)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def resolve_root(args) -> Path:
+    """Raíz del proyecto: ``--root`` > ``BATRADE_ROOT`` > paquete instalado.
+
+    Sin esto el comando enlazado dependería del directorio desde el que se
+    invoca: `batrade doctor` en /tmp leería /tmp/config.yaml.
+    """
+    explicit = getattr(args, "root", None)
+    if explicit:
+        return Path(str(explicit)).expanduser().resolve()
+    env = (os.environ.get("BATRADE_ROOT") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return package_root()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        cfg = load(args.config, args.root)
+        cfg = load(args.config, resolve_root(args))
     except ConfigError as exc:
         print("Configuración inválida:", file=sys.stderr)
         for err in exc.errors:
@@ -205,7 +227,7 @@ def _config_file(args) -> Path:
     """Ruta absoluta del config.yaml con la que arrancar los hijos."""
     path = Path(args.config)
     if not path.is_absolute():
-        path = (Path(args.root) if args.root else Path.cwd()) / path
+        path = resolve_root(args) / path
     return path.resolve()
 
 

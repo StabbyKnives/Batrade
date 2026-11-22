@@ -44,6 +44,27 @@ bash install.sh --systemd        # installs the systemd units (root required)
 bash install.sh --venv --link    # also links `batrade` into ~/.local/bin (or /usr/local/bin)
 ```
 
+### System-wide installation
+
+For a real machine or VM, one command installs Batrade under `/opt/batrade` and leaves
+`batrade` in `PATH` (`/usr/local/bin/batrade`, a wrapper that pins `BATRADE_ROOT` so the
+command works from any directory):
+
+```bash
+sudo bash install.sh --system                      # install to /opt/batrade
+sudo bash install.sh --system --install-deps --start   # + system packages + start sensor and panel
+sudo bash install.sh --system --prefix /srv/batrade --dry-run   # show the plan, change nothing
+sudo bash install.sh --uninstall                   # remove code and command, keep var/, .env, config.yaml
+sudo bash install.sh --uninstall --purge --yes     # also delete data and configuration
+```
+
+It must run as root (otherwise it tells you to use `sudo`). The steps are the same ones
+listed below, plus: it copies the repository **without** `.git`, `var/`, `.venv` or
+`.env`, creating the virtualenv inside the prefix; and it reuses an existing
+`config.yaml`, `.env` and `var/` on reinstall, so an update never overwrites the
+operator's configuration or data. `--start` launches sensor and dashboard at the end.
+`--uninstall` refuses to run while a CLI-managed component is alive.
+
 The installer:
 
 1. detects the distribution and package manager (apt, dnf, pacman, zypper, apk);
