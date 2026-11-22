@@ -37,9 +37,21 @@ HOST_TIMEOUT = {"quick": "60s", "standard": "120s", "vuln": "300s"}
 
 # Pasada UDP de los puertos del catálogo: acotada a propósito, porque UDP no
 # responde y nmap debe esperar timeouts. Sólo se ejecuta con CAP_NET_RAW.
-UDP_HOST_TIMEOUT = "30s"
+# La detección de versión (-sV) es lo que convierte un `open|filtered` en
+# `open` cuando el servicio contesta a la sonda; sin ella SSDP/mDNS se quedan
+# casi siempre en `open|filtered` y no se puede afirmar nada.
 UDP_MAX_RETRIES = "1"
-UDP_PROCESS_TIMEOUT = 90
+UDP_PROCESS_MARGIN_S = 30
+
+
+def udp_timeouts(cfg: Config) -> tuple[int, int]:
+    """(host-timeout, timeout de proceso) de la pasada UDP, en segundos.
+
+    El proceso debe durar más que el host-timeout para que nmap alcance a
+    escribir el XML, pero no mucho más: 30 s de margen.
+    """
+    host = max(1, int(cfg.scan.udp_timeout))
+    return host, host + UDP_PROCESS_MARGIN_S
 
 
 def profile_timeout(cfg: Config, profile: str) -> int:
@@ -96,6 +108,10 @@ def build_udp_argv(cfg: Config, target: str, caps: Capabilities,
 
     Devuelve ``[]`` cuando no hay nada que explorar: sin ``CAP_NET_RAW`` no se
     puede hacer un escaneo UDP real y nmap sólo devolvería ``open|filtered``.
+
+    ``-sV --version-light`` es deliberado: la sonda de servicio es lo que
+    permite que un SSDP o mDNS que responde pase de ``open|filtered`` a
+    ``open``. Sin ella la pasada no produciría apenas hallazgos reales.
     """
     if not caps.raw_capture:
         return []
@@ -104,8 +120,10 @@ def build_udp_argv(cfg: Config, target: str, caps: Capabilities,
         return []
     if not ip_in_cidr(target, cfg.network.cidr):
         raise ScanError(f"objetivo fuera del CIDR configurado: {target}")
-    return ["nmap", "-sU", "-Pn", "-p", "U:" + ",".join(str(p) for p in udp_ports),
-            cfg.scan.timing, "--host-timeout", UDP_HOST_TIMEOUT,
+    host_timeout, _proceso = udp_timeouts(cfg)
+    return ["nmap", "-sU", "-sV", "--version-light", "-Pn",
+            "-p", "U:" + ",".join(str(p) for p in udp_ports),
+            cfg.scan.timing, "--host-timeout", f"{host_timeout}s",
             "--max-retries", UDP_MAX_RETRIES, "-oX", str(xml_path), target]
 
 
@@ -175,12 +193,13 @@ def _run_udp_pass(cfg: Config, target: str, caps: Capabilities,
         return
     if not argv:
         return
+    _host_timeout, udp_proceso = udp_timeouts(cfg)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=UDP_PROCESS_TIMEOUT, check=False)
+                              timeout=udp_proceso, check=False)
     except subprocess.TimeoutExpired:
         _safe_unlink(udp_path)
-        result.notes.append(f"la pasada UDP excedió {UDP_PROCESS_TIMEOUT}s")
+        result.notes.append(f"la pasada UDP excedió {udp_proceso}s")
         return
     except OSError as exc:
         _safe_unlink(udp_path)

@@ -67,6 +67,7 @@ def test_run_scan_explicit_timeout_wins(cfg, monkeypatch):
 
 @pytest.mark.parametrize("key, valor", [
     ("quick_timeout", 0),
+    ("udp_timeout", 4),
     ("quick_periodic_hours", 0),
     ("weekly_rescan_days", 0),
 ])

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Fixture sintético: pasada UDP con detección de versión (-sV).
+     5353/udp pasó de open|filtered a open porque el servicio respondió a la
+     sonda; 1900/udp se quedó en open|filtered y NO debe generar evento.
+     No contiene datos de equipos reales. -->
+<nmaprun scanner="nmap" args="nmap -sU -sV --version-light -p U:1900,5353" start="1760000000" version="7.99">
+<host><status state="up"/>
+<hostnames><hostname name="lab-nas.local" type="PTR"/></hostnames>
+<ports>
+<port protocol="udp" portid="1900"><state state="open|filtered" reason="no-response"/>
+  <service name="upnp" method="table"/></port>
+<port protocol="udp" portid="5353"><state state="open" reason="udp-response"/>
+  <service name="mdns" product="Avahi" version="0.8" extrainfo="Ubuntu"
+           method="probed" conf="10"/></port>
+</ports>
+</host></nmaprun>

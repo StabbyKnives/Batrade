@@ -64,6 +64,7 @@ class ScanCfg:
     timing: str = "-T3"
     standard_timeout: int = 300
     quick_timeout: int = 120
+    udp_timeout: int = 60
     quick_periodic_hours: int = 24
     weekly_rescan_days: int = 7
     risky_ports: dict[tuple[str, int], RiskyPort] = field(default_factory=dict)
@@ -341,6 +342,7 @@ def load_config(path: str | Path = "config.yaml", root: str | Path | None = None
         timing=str(_get(scan_raw, "timing", "-T3")),
         standard_timeout=int(_get(scan_raw, "standard_timeout", 300)),
         quick_timeout=int(_get(scan_raw, "quick_timeout", 120)),
+        udp_timeout=int(_get(scan_raw, "udp_timeout", 60)),
         quick_periodic_hours=int(_get(scan_raw, "quick_periodic_hours", 24)),
         weekly_rescan_days=int(_get(scan_raw, "weekly_rescan_days", 7)),
         risky_ports=_parse_risky(scan_raw.get("risky_ports") or [], errors),
@@ -422,6 +424,8 @@ def load_config(path: str | Path = "config.yaml", root: str | Path | None = None
         errors.append("detect.cooldown_s no puede ser negativo")
     if scan.quick_timeout < 1:
         errors.append(f"scan.quick_timeout debe ser >= 1: {scan.quick_timeout}")
+    if scan.udp_timeout < 5:
+        errors.append(f"scan.udp_timeout debe ser >= 5: {scan.udp_timeout}")
     if scan.quick_periodic_hours < 1:
         errors.append(f"scan.quick_periodic_hours debe ser >= 1: {scan.quick_periodic_hours}")
     if scan.weekly_rescan_days < 1:

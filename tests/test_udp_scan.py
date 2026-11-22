@@ -11,6 +11,8 @@ from batrade.net.caps import Capabilities
 from batrade.net.nmap_scan import build_udp_argv, parse_xml, run_scan, udp_risky_ports
 
 FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "nmap" / "udp_scan.xml"
+FIXTURE_VERSIONED = (Path(__file__).resolve().parent.parent / "fixtures" / "nmap"
+                     / "udp_scan_versioned.xml")
 
 TCP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <nmaprun scanner="nmap" args="nmap">
@@ -56,6 +58,28 @@ def test_udp_argv_is_bounded_and_uses_catalog(cfg):
     assert "shell" not in argv
 
 
+def test_udp_argv_enables_version_detection(cfg):
+    """Sin -sV, SSDP/mDNS responden open|filtered y la pasada no sirve de nada."""
+    argv = build_udp_argv(cfg, "10.10.10.50", RAW, Path("/tmp/x.xml"))
+    assert "-sV" in argv
+    assert "--version-light" in argv
+
+
+def test_udp_timeout_is_configurable(cfg):
+    cfg.scan.udp_timeout = 15
+    argv = build_udp_argv(cfg, "10.10.10.50", RAW, Path("/tmp/x.xml"))
+    assert argv[argv.index("--host-timeout") + 1] == "15s"
+    host, proceso = nmap_scan.udp_timeouts(cfg)
+    assert (host, proceso) == (15, 15 + nmap_scan.UDP_PROCESS_MARGIN_S)
+
+
+def test_udp_timeout_default_is_60(cfg):
+    assert cfg.scan.udp_timeout == 60
+    argv = build_udp_argv(cfg, "10.10.10.50", RAW, Path("/tmp/x.xml"))
+    assert argv[argv.index("--host-timeout") + 1] == "60s"
+    assert nmap_scan.udp_timeouts(cfg) == (60, 90)
+
+
 def test_udp_argv_rejects_target_outside_cidr(cfg):
     try:
         build_udp_argv(cfg, "8.8.8.8", RAW, Path("/tmp/x.xml"))
@@ -78,6 +102,27 @@ def test_fixture_keeps_only_open_udp_ports():
     parsed = parse_xml(FIXTURE)
     assert [(p["port"], p["protocol"]) for p in parsed["ports"]] == [(1900, "udp")]
     assert parsed["hostnames"] == ["lab-tv.local"]
+
+
+def test_version_detection_turns_filtered_into_open():
+    """El fixture reproduce el caso real: -sV convierte mDNS en open con versión."""
+    parsed = parse_xml(FIXTURE_VERSIONED)
+    assert [(p["port"], p["protocol"]) for p in parsed["ports"]] == [(5353, "udp")]
+    assert parsed["ports"][0]["version"] == "Avahi 0.8 Ubuntu"
+    assert parsed["hostnames"] == ["lab-nas.local"]
+
+
+def test_versioned_udp_port_creates_port_risky(conn, cfg):
+    cfg.scan.risky_ports = dict(cfg.scan.risky_ports)
+    from batrade.config import RiskyPort
+    cfg.scan.risky_ports[("udp", 5353)] = RiskyPort(5353, "udp", "mDNS", "multicast")
+    did = _device(conn)
+    parsed = parse_xml(FIXTURE_VERSIONED)
+    diff = store.apply_scan_ports(conn, did, parsed["ports"], 2000,
+                                  cfg.scan.risky_ports, protocolos={"tcp", "udp"},
+                                  perfil="standard")
+    assert [(p["protocol"], p["port"]) for p in diff["new_risky"]] == [("udp", 5353)]
+    assert diff["new_risky"][0]["version"] == "Avahi 0.8 Ubuntu"
 
 
 def test_open_filtered_never_reaches_the_database(conn, cfg, tmp_path):

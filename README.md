@@ -218,9 +218,22 @@ batrade doctor
 
 Scheduling happens after each sweep: a device seen for the first time gets a `standard` scan; an overdue trusted device gets a new `standard`; anything else overdue gets a `quick`. Weekly rescans are staggered — at most `max_concurrent` per sweep, oldest first — so a network that was offline for a week does not fire a burst of nmap processes. In-flight jobs are coalesced by `(address, profile)`, and the same pair requested from the dashboard cannot be queued twice.
 
-UDP ports of the catalogue are scanned with a second, tightly bounded nmap pass (`-sU -p U:<catalogue> --host-timeout 30s --max-retries 1`) only when the sensor has `CAP_NET_RAW`. Only ports reported `open` are stored: `open|filtered` is the normal outcome for UDP without a reply and would produce false positives. Without raw capture the pass is skipped, the sensor logs the limitation once per scan, and `/health` shows *"UDP no verificable sin CAP_NET_RAW"*. A protocol that was not scanned never marks its known ports as closed.
+UDP ports of the catalogue are scanned with a second, tightly bounded nmap pass (`-sU -sV --version-light -p U:<catalogue> --host-timeout <scan.udp_timeout>s --max-retries 1`) only when the sensor has `CAP_NET_RAW`. Version detection is what turns an `open|filtered` into `open` when the service answers the probe; only ports reported `open` are stored, because `open|filtered` is the normal outcome for UDP without a reply and would produce false positives. Without raw capture the pass is skipped, the sensor logs the limitation once per scan, and `/health` shows *"UDP no verificable sin CAP_NET_RAW"*. A protocol that was not scanned never marks its known ports as closed.
 
 **Closing ports is a claim, and only `standard`/`vuln` may make it.** `quick` (`-F`) covers roughly the top 100 TCP ports, so its silence about everything else proves nothing: it only opens and updates ports. A port that really disappears is marked `closed` by the next `standard` scan, and if it later comes back, that reappearance is reported again as `port_new` (and `port_risky` for catalogue ports) because a service that returns is news. The trade-off: a genuine closure can take until the next `standard` scan (weekly by default) to be reflected in the panel.
+
+### Verifying UDP detection by hand
+
+This cannot be automated in the test suite: it needs `CAP_NET_RAW`, nmap probing a real device, and a service that actually answers. Do it on the VM with a device that speaks SSDP or mDNS (a smart TV, a printer, a NAS, or the router itself).
+
+1. Confirm the sensor really has raw capture: `batrade doctor` must print `CAP_NET_RAW : sí` and `modo … efectivo: live`.
+2. Make sure ports `1900` and `5353` (UDP) are in `scan.risky_ports` — the default catalogue includes both.
+3. Trigger a `standard` scan of that device: dashboard → device detail → *Escaneo manual* → `standard`, or
+   `sudo batrade sensor --mode live` and wait for the first sweep.
+4. Expected result: in `/events` a `port_risky` (warn) event for that device mentioning `1900/udp` (UPnP/SSDP) or `5353/udp` (mDNS), and the port listed in the device detail with protocol `udp`. The scan row in `/health`/device detail shows the run finishing normally.
+5. If you only see the pass timing out, raise `scan.udp_timeout` (default 60 s) and retry. If nmap still reports `open|filtered` for a device you know is answering, that is expected for services that ignore version probes; Batrade deliberately does not turn `open|filtered` into an event.
+
+Record the outcome in the VM test notes: *real UDP validation pending in VM* until you run it.
 
 ## Data retention
 

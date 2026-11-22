@@ -37,6 +37,7 @@ scan:
   timing: "-T3"
   standard_timeout: 300
   quick_timeout: 120
+  udp_timeout: 60
   quick_periodic_hours: 24
   weekly_rescan_days: 7
   risky_ports:

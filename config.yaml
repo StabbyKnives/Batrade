@@ -35,6 +35,9 @@ scan:
   timing: "-T3"
   standard_timeout: 300
   quick_timeout: 120
+  # Límite del host para la pasada UDP (-sU -sV). El proceso de nmap recibe
+  # este valor + 30 s de margen. Mínimo 5.
+  udp_timeout: 60
   # Perfil rápido para reescaneos periódicos.
   quick_periodic_hours: 24
   # Reescaneo semanal de equipos confiables (RF-10).
