@@ -285,11 +285,12 @@ Commands:
   start             Start sensor and dashboard in the background
   stop              Stop both components
   restart           Restart both components
-  status            Show PIDs, heartbeat age and dashboard URL
+  status            Show PIDs, heartbeat age, user and effective mode
   sensor            Run the monitoring daemon in the foreground
   dashboard         Serve the web dashboard in the foreground
   demo              Seed the database with demonstration scenarios
   approve-baseline  Mark all current devices as trusted
+  reset-db          Wipe data and scan artifacts (root only, sensor stopped)
   export            Export devices, events, or ports as CSV or JSON
 
 Global options:
@@ -314,6 +315,40 @@ Copy `.env.example` to `.env`, fill in the credentials you want to use, and rest
 cp .env.example .env
 chmod 600 .env
 ```
+
+## Resetting the database
+
+`demo`, `replay` and `simulate` write real rows into the same database as the live sensor, so
+after a test session the inventory and events are polluted. `reset-db` cleans them:
+
+```bash
+sudo batrade stop                 # the sensor must not be running
+sudo batrade reset-db             # asks you to type REINICIAR
+sudo batrade reset-db --yes       # non-interactive
+sudo batrade reset-db --keep-devices   # keep inventory, wipe events/ports/scans
+sudo batrade reset-db --keep-logs      # keep scan XML and var/alerts.log
+sudo batrade reset-db --no-backup      # skip the safety copy
+```
+
+- **Root only.** The command checks `geteuid() == 0` and refuses otherwise; it does not
+  implement its own password.
+- **Sensor stopped.** If a CLI-managed sensor or `batrade-sensor.service` is running it
+  refuses and tells you to stop it first (it never stops it for you).
+- **Confirmation.** Without `--yes` it prints what will be deleted (path, size, row counts)
+  and requires typing `REINICIAR`; without a TTY it aborts.
+- **Backup by default.** `<db>.bak-reset-<epoch_ms>` with mode 600, created with SQLite's
+  backup API and never overwritten.
+- **Scope.** By default every data table is emptied (inventory, history, ports, scans,
+  events, queue, requests, heartbeat, tool status, baseline) and `init` runs again: learning
+  mode back on, no baseline. `--keep-devices` keeps inventory, history and baseline and only
+  clears events/ports/scans/queue/requests/tool status.
+- **Artifacts.** Scan XML under `paths.scans_dir` and `var/alerts.log` are cleared too
+  (path containment enforced, symlinks and files outside the directory are ignored).
+- **Audit.** The operation is logged in `var/log/batrade.log` with scope, row counts and the
+  invoking user (`SUDO_USER`), never inventory contents.
+
+Exit codes: `0` done, `1` refused or cancelled, `2` invalid arguments or configuration.
+The reset is **never** exposed in the dashboard and never runs automatically.
 
 ## Production deployment
 

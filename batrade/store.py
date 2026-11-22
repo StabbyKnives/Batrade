@@ -599,3 +599,66 @@ def purge(conn: sqlite3.Connection, before_ts: int) -> dict[str, Any]:
         "notifications": notifications,
         "scan_xml": [str(r["ruta_xml"]) for r in xml_rows if r["ruta_xml"]],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Reinicio de la base (acción manual, sólo CLI con root)
+# --------------------------------------------------------------------------- #
+# El alcance está fijado aquí a propósito: ningún llamador pasa nombres de
+# tabla, así que no hay forma de inyectar SQL por esta vía.
+RESET_TABLES_ALL = (
+    "notification_queue", "events", "ports", "scans", "scan_requests",
+    "device_history", "devices", "identities", "heartbeat", "tool_status",
+    "network_baseline",
+)
+RESET_TABLES_KEEP_DEVICES = (
+    "notification_queue", "events", "ports", "scans", "scan_requests", "tool_status",
+)
+
+
+def table_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Filas por tabla de datos, para el resumen previo al reset."""
+    out: dict[str, int] = {}
+    for table in RESET_TABLES_ALL:
+        try:
+            row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+            out[table] = int(row["n"]) if row else 0
+        except sqlite3.OperationalError:
+            out[table] = 0
+    return out
+
+
+def _reset_tables(conn: sqlite3.Connection, tables: tuple[str, ...]) -> dict[str, int]:
+    """Vacía las tablas indicadas en una única transacción."""
+    counts: dict[str, int] = {}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # El orden importa por las claves foráneas: primero las hijas.
+        for table in tables:
+            counts[table] = conn.execute(f"DELETE FROM {table}").rowcount
+        try:
+            # Sólo existe si alguna tabla usó AUTOINCREMENT; si no, se ignora.
+            conn.execute("DELETE FROM sqlite_sequence")
+        except sqlite3.OperationalError:
+            pass
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    return counts
+
+
+def reset_all(conn: sqlite3.Connection) -> dict[str, int]:
+    """Borra todos los datos: quedan sólo el esquema y la versión."""
+    return _reset_tables(conn, RESET_TABLES_ALL)
+
+
+def reset_keep_devices(conn: sqlite3.Connection) -> dict[str, int]:
+    """Borra eventos, puertos, escaneos y estados; conserva el inventario."""
+    return _reset_tables(conn, RESET_TABLES_KEEP_DEVICES)
+
+
+def vacuum(conn: sqlite3.Connection) -> None:
+    """Compacta el archivo tras el reset (fuera de transacción, por diseño)."""
+    conn.execute("VACUUM")

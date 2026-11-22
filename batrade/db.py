@@ -259,20 +259,15 @@ def _main_db_path(conn: sqlite3.Connection) -> Path | None:
     return None
 
 
-def backup(conn: sqlite3.Connection, version: int) -> Path | None:
-    """Copia de seguridad previa a migrar: ``<db>.bak-v<versión>`` (permisos 600).
-
-    Nunca sobrescribe una copia anterior: si el nombre ya existe añade ``-2``,
-    ``-3``… Usa la API de backup de SQLite para incluir lo que aún esté en el
-    WAL. Devuelve la ruta creada o ``None`` si no había nada que copiar.
-    """
+def _write_backup(conn: sqlite3.Connection, tag: str) -> Path | None:
+    """Copia `<db>.bak-<tag>` sin sobrescribir; permisos 600."""
     path = _main_db_path(conn)
     if path is None or not path.exists() or path.stat().st_size == 0:
         return None
-    target = path.with_name(f"{path.name}.bak-v{version}")
+    target = path.with_name(f"{path.name}.bak-{tag}")
     suffix = 2
     while target.exists():
-        target = path.with_name(f"{path.name}.bak-v{version}-{suffix}")
+        target = path.with_name(f"{path.name}.bak-{tag}-{suffix}")
         suffix += 1
     dest = sqlite3.connect(str(target))
     try:
@@ -283,8 +278,23 @@ def backup(conn: sqlite3.Connection, version: int) -> Path | None:
         target.chmod(0o600)
     except OSError:  # pragma: no cover - sistemas sin permisos POSIX
         pass
-    log.info("copia de seguridad del esquema v%s en %s", version, target.name)
+    log.info("copia de seguridad de la base en %s", target.name)
     return target
+
+
+def backup(conn: sqlite3.Connection, version: int) -> Path | None:
+    """Copia de seguridad previa a migrar: ``<db>.bak-v<versión>`` (permisos 600).
+
+    Nunca sobrescribe una copia anterior: si el nombre ya existe añade ``-2``,
+    ``-3``… Usa la API de backup de SQLite para incluir lo que aún esté en el
+    WAL. Devuelve la ruta creada o ``None`` si no había nada que copiar.
+    """
+    return _write_backup(conn, f"v{version}")
+
+
+def backup_tagged(conn: sqlite3.Connection, tag: str) -> Path | None:
+    """Copia con una etiqueta libre, p. ej. ``reset-<epoch_ms>``."""
+    return _write_backup(conn, str(tag))
 
 
 def migrate(conn: sqlite3.Connection) -> int:

@@ -86,6 +86,17 @@ def _parser() -> argparse.ArgumentParser:
     ab.add_argument("--include-random-mac", action="store_true",
                     help="aprueba también dispositivos con MAC aleatoria (no recomendado)")
 
+    rd = sub.add_parser("reset-db", parents=[common],
+                        help="vacía la base de datos y los artefactos (requiere root)")
+    rd.add_argument("--keep-devices", action="store_true",
+                    help="conserva inventario, historial y línea base")
+    rd.add_argument("--keep-logs", action="store_true",
+                    help="conserva los XML de escaneo y var/alerts.log")
+    rd.add_argument("--no-backup", action="store_true",
+                    help="no crea la copia previa <db>.bak-reset-<epoch_ms>")
+    rd.add_argument("--yes", "-y", action="store_true",
+                    help="no pide confirmación (pensado para automatizar)")
+
     ex = sub.add_parser("export", parents=[common], help="exporta inventario o eventos")
     ex.add_argument("--what", choices=["devices", "events", "ports"], default="devices")
     ex.add_argument("--format", choices=["csv", "json"], default="csv")
@@ -130,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
                "approve-baseline": cmd_approve, "export": cmd_export,
                "interfaces": cmd_interfaces, "ifaces": cmd_interfaces,
                "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
+               "reset-db": cmd_reset_db,
                "status": cmd_status}[args.command]
     try:
         return int(handler(cfg, args) or 0)
@@ -363,6 +375,18 @@ def cmd_status(cfg: Config, _args) -> int:
 
 def cmd_init(cfg: Config, _args) -> int:
     conn = db.initialize(cfg.paths.db)
+    gw = _init_meta(conn, cfg)
+    print(f"Base de datos lista en {cfg.paths.db}  ·  schema v{db.user_version(conn)}")
+    print(f"Interfaz vigilada: {cfg.network.interface or '(ninguna)'}  ·  "
+          f"subred {cfg.network.cidr}  ·  gateway {gw or 'sin definir'}")
+    print(f"Directorio de escaneos: {cfg.paths.scans_dir}")
+    print("Siguiente paso: `python3 -m batrade sensor --mode degraded` y "
+          "`python3 -m batrade dashboard` en otra terminal.")
+    return 0
+
+
+def _init_meta(conn, cfg: Config) -> str | None:
+    """Metadatos de línea base que deja `init`; también los usa `reset-db`."""
     ts = store_now()
     gw = cfg.network.gateway_ip or default_gateway()
     if gw and not ip_in_cidr(gw, cfg.network.cidr):
@@ -372,12 +396,142 @@ def cmd_init(cfg: Config, _args) -> int:
         store.set_meta(conn, "gateway_ip", gw, ts)
     store.set_meta(conn, "sensor_mode", cfg.sensor.mode, ts)
     store.set_meta(conn, "interface", cfg.network.interface, ts)
-    print(f"Base de datos lista en {cfg.paths.db}  ·  schema v{db.user_version(conn)}")
-    print(f"Interfaz vigilada: {cfg.network.interface or '(ninguna)'}  ·  "
-          f"subred {cfg.network.cidr}  ·  gateway {gw or 'sin definir'}")
-    print(f"Directorio de escaneos: {cfg.paths.scans_dir}")
-    print("Siguiente paso: `python3 -m batrade sensor --mode degraded` y "
-          "`python3 -m batrade dashboard` en otra terminal.")
+    return gw
+
+
+# --------------------------------------------------------------------------- #
+# reset-db: acción manual, explícita y sólo CLI (nunca en el panel)
+# --------------------------------------------------------------------------- #
+RESET_WORD = "REINICIAR"
+
+
+def _confirm_reset(assume_yes: bool) -> bool:
+    """Exige escribir REINICIAR; sin TTY aborta en vez de adivinar."""
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print("Sin terminal interactiva: repite con --yes para confirmar", file=sys.stderr)
+        return False
+    try:
+        respuesta = input(f"Escribe {RESET_WORD} para continuar: ")
+    except EOFError:
+        return False
+    return respuesta.strip() == RESET_WORD
+
+
+def cmd_reset_db(cfg: Config, args) -> int:
+    """Vacía la base y los artefactos de pruebas. Requiere root y sensor parado."""
+    from batrade import daemon
+    from batrade.sensor import safe_unlink_scan
+
+    if os.geteuid() != 0:
+        print("reset-db requiere privilegios de administrador: ejecuta con sudo",
+              file=sys.stderr)
+        return 1
+
+    # El sensor es el único escritor: con él vivo no se toca la base.
+    sensor_activo = (daemon.pid_of(cfg, "sensor") is not None
+                     or daemon.systemd_unit_active("batrade-sensor.service"))
+    if sensor_activo:
+        print("El sensor está en ejecución: deténlo antes con 'batrade stop' o "
+              "'sudo systemctl stop batrade-sensor' y repite el reset.", file=sys.stderr)
+        return 1
+
+    if not cfg.paths.db.exists():
+        print(f"No hay base de datos en {cfg.paths.db}; nada que reiniciar.")
+        return 0
+
+    keep_devices = bool(getattr(args, "keep_devices", False))
+    keep_logs = bool(getattr(args, "keep_logs", False))
+    no_backup = bool(getattr(args, "no_backup", False))
+    assume_yes = bool(getattr(args, "yes", False))
+
+    conn = db.connect(cfg.paths.db)
+    try:
+        counts = store.table_counts(conn)
+        try:
+            tamano = cfg.paths.db.stat().st_size / 1024
+        except OSError:
+            tamano = 0.0
+        print("Se va a reiniciar la base de datos:")
+        print(f"  ruta         : {cfg.paths.db}")
+        print(f"  tamaño       : {tamano:.1f} KiB")
+        print(f"  alcance      : {'inventario conservado' if keep_devices else 'borrado completo'}")
+        print(f"  se borran    : {counts.get('events', 0)} eventos, "
+              f"{counts.get('ports', 0)} puertos, {counts.get('scans', 0)} escaneos, "
+              f"{counts.get('notification_queue', 0)} notificaciones")
+        if keep_devices:
+            print(f"  se conservan : {counts.get('devices', 0)} dispositivos y su historial")
+        else:
+            print(f"  se borran    : {counts.get('devices', 0)} dispositivos y la línea base")
+        print(f"  copia previa : "
+              f"{'(omitida por --no-backup)' if no_backup else f'{cfg.paths.db.name}.bak-reset-<epoch_ms>'}")
+        print(f"  artefactos   : "
+              f"{'conservados (--keep-logs)' if keep_logs else 'XML de escaneo y alerts.log'}")
+
+        if not _confirm_reset(assume_yes):
+            print("reset cancelado: no se ha modificado nada", file=sys.stderr)
+            return 1
+
+        copia = None
+        if not no_backup:
+            copia = db.backup_tagged(conn, f"reset-{store_now()}")
+        filas = (store.reset_keep_devices if keep_devices else store.reset_all)(conn)
+        store.vacuum(conn)
+        gw = None
+        if not keep_devices:
+            # Misma lógica que `init`: sin línea base, aprendizaje activo.
+            gw = _init_meta(conn, cfg)
+    finally:
+        conn.close()
+
+    xml_borrados = 0
+    xml_ignorados = 0
+    alerts_vaciado = False
+    if not keep_logs:
+        try:
+            candidatos = sorted(cfg.paths.scans_dir.glob("*.xml"))
+        except OSError:
+            candidatos = []
+        for xml in candidatos:
+            if safe_unlink_scan(cfg.paths.scans_dir, xml):
+                xml_borrados += 1
+            else:
+                xml_ignorados += 1
+        if cfg.paths.alerts_log.exists():
+            try:
+                cfg.paths.alerts_log.write_text("", encoding="utf-8")
+                cfg.paths.alerts_log.chmod(0o600)
+                alerts_vaciado = True
+            except OSError as exc:
+                print(f"  aviso: no se pudo vaciar {cfg.paths.alerts_log.name}: {exc}",
+                      file=sys.stderr)
+
+    print("Base reiniciada.")
+    check = db.connect(cfg.paths.db, readonly=True)
+    try:
+        version = db.user_version(check)
+    finally:
+        check.close()
+    print(f"  filas borradas: {sum(filas.values())}  ·  schema v{version}")
+    if copia is not None:
+        print(f"  copia         : {copia.name} (permisos 600)")
+    if not keep_logs:
+        print(f"  XML borrados  : {xml_borrados}"
+              + (f" (ignorados: {xml_ignorados})" if xml_ignorados else ""))
+        if alerts_vaciado:
+            print("  alerts.log    : vaciado")
+    if not keep_devices:
+        print(f"  línea base    : reiniciada (aprendizaje activo, "
+              f"gateway {gw or 'sin definir'})")
+
+    log.info("reset-db", extra={"fields": {
+        "alcance": "keep-devices" if keep_devices else "completo",
+        "filas": filas,
+        "backup": copia.name if copia else None,
+        "xml": xml_borrados,
+        "usuario": os.environ.get("SUDO_USER") or whoami(),
+    }})
     return 0
 
 
