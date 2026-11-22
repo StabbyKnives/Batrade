@@ -35,7 +35,7 @@ def test_locally_administered_bit():
 def test_multicast_and_prefix():
     assert is_multicast_mac("01:00:5e:00:00:01")
     assert not is_multicast_mac("00:0c:29:1b:2c:3d")
-    assert oui_prefix("00:0c:29:1b:2c:3d") == "005056"
+    assert oui_prefix("00:0c:29:1b:2c:3d") == "000C29"
 
 
 def test_ip_validation_and_cidr():

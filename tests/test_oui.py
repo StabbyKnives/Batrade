@@ -7,7 +7,7 @@ from batrade.net.oui import OuiDB
 
 def test_configured_path_missing_falls_back(tmp_path, monkeypatch):
     fallback = tmp_path / "nmap-mac-prefixes"
-    fallback.write_text("005056 VMware\n3C22FB Apple\n", encoding="utf-8")
+    fallback.write_text("000C29 VMware\n3C22FB Apple\n", encoding="utf-8")
     monkeypatch.setattr(oui_mod, "CANDIDATE_FILES", (str(fallback),))
 
     db = OuiDB.load(tmp_path / "no-existe")
