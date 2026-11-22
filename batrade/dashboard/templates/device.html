@@ -111,7 +111,12 @@
       <tbody>
       {% for e in events %}
         <tr><td><span class="chip {{ e['severidad'] }}">{{ sev_label[e['severidad']] }}</span></td>
-            <td>{{ e["tipo"] }}</td><td title="{{ e['last_ts']|ts }}">{{ e["last_ts"]|ago }}</td></tr>
+            <td>{{ e["tipo"] }}
+              {% set v = e["detalle_json"]|verif %}
+              {% if e["verified"] %}<span class="tag ok">verificado</span>
+              {% elif v %}<span class="tag {{ v['clase'] }}" title="{{ v['motivo'] }}">{{ v["texto"] }}</span>
+              {% endif %}</td>
+            <td title="{{ e['last_ts']|ts }}">{{ e["last_ts"]|ago }}</td></tr>
       {% endfor %}
       </tbody>
     </table>

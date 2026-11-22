@@ -35,7 +35,9 @@ from batrade.net.iputil import (default_gateway, interface_ipv4, ip_in_cidr,
 from batrade.net.neigh import NeighborWatcher
 from batrade.net.nmap_scan import ScanError, run_scan, udp_risky_ports
 from batrade.net.oui import OuiDB
-from batrade.net.verify import interpret, probe_binding
+from batrade.net.verify import (ESTADO_CONFIRMADO, ESTADO_DESCARTADO,
+                                ESTADO_NO_VERIFICABLE, estado_verificacion,
+                                interpret, probe_binding)
 from batrade.notify import Notifier
 
 log = logging.getLogger("batrade.sensor")
@@ -553,27 +555,46 @@ class Sensor:
             enqueue=lambda eid, t: self.notifier.enqueue(conn, eid, t),
         )
         for finding, event_id, is_new in out:
-            if is_new and finding.needs_verify and self.cfg.detect.arp_verify:
-                self._spawn_verification(event_id, finding.needs_verify)
+            if not (is_new and finding.needs_verify and self.cfg.detect.arp_verify):
+                continue
+            if not self.caps.raw_capture:
+                # Sin CAP_NET_RAW no hay sonda posible: se deja constancia para
+                # que el panel distinga "no verificable" de "sin respuesta".
+                store.set_event_verified(conn, event_id, False, {
+                    "verificacion": {
+                        "estado": ESTADO_NO_VERIFICABLE,
+                        "motivo": ("sin CAP_NET_RAW no se puede sondear ARP: la alerta se "
+                                   "basa sólo en la evidencia pasiva"),
+                    },
+                    "macs_observadas": [],
+                })
+                continue
+            self._spawn_verification(event_id, finding.needs_verify)
         return len(out)
 
     def _spawn_verification(self, event_id: int, ip: str) -> None:
-        if not self.caps.raw_capture:
-            return
+        """Lanza la sonda ARP sin bloquear la alerta (decisión C2)."""
+        threading.Thread(target=self._run_verification, args=(event_id, ip),
+                         name="batrade-verify", daemon=True).start()
 
-        def worker() -> None:
-            macs = probe_binding(ip, self.cfg.network.interface,
-                                 self.cfg.detect.arp_verify_timeout)
-            confirmed, explanation = interpret(macs, self.engine.baseline.gateway_mac)
-            conn = db.connect(self.cfg.paths.db)
-            try:
-                store.set_event_verified(conn, event_id, bool(confirmed),
-                                         {"verificacion": explanation,
-                                          "macs_observadas": sorted(macs or [])})
-            finally:
-                conn.close()
-
-        threading.Thread(target=worker, name="batrade-verify", daemon=True).start()
+    def _run_verification(self, event_id: int, ip: str) -> None:
+        """Sondea, interpreta y anota el resultado en el evento."""
+        macs = probe_binding(ip, self.cfg.network.interface,
+                             self.cfg.detect.arp_verify_timeout)
+        confirmed, explanation = interpret(macs, self.engine.baseline.gateway_mac)
+        estado = estado_verificacion(macs, confirmed)
+        if estado in (ESTADO_CONFIRMADO, ESTADO_DESCARTADO):
+            # Formato histórico del bloque (texto plano): no se cambia.
+            verificacion: object = explanation
+        else:
+            verificacion = {"estado": estado, "motivo": explanation}
+        conn = db.connect(self.cfg.paths.db)
+        try:
+            store.set_event_verified(conn, event_id, bool(confirmed),
+                                     {"verificacion": verificacion,
+                                      "macs_observadas": sorted(macs or [])})
+        finally:
+            conn.close()
 
     def _tool_failure_findings(self, tool: str, error: str, failures: int, ts: int) -> list:
         from batrade.events import tool_failure_findings

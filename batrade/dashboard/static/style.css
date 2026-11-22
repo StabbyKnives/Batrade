@@ -226,6 +226,7 @@ h1 + p, .page-head p { margin: 2px 0 0; }
   border: 1px solid var(--line);
 }
 .tag.ok { color: var(--ok); border-color: rgba(52, 211, 153, .35); }
+.tag.warn { color: var(--warn); border-color: rgba(251, 191, 36, .35); }
 
 /* ------------------------------------------------------------------- kv */
 .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; margin: 0; font-size: 13px; }

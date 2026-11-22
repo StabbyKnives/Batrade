@@ -47,6 +47,35 @@ def _human_age(ms: int | None) -> str:
     return f"hace {sec // 86400} d"
 
 
+def verification_label(raw) -> dict | None:
+    """Etiqueta del estado de verificación ARP de un evento.
+
+    ``detalle_json.verificacion`` puede ser un texto (formato histórico, cuando
+    la sonda confirmó o descartó) o un bloque ``{"estado", "motivo"}`` con
+    ``no_verificable`` / ``sin_respuesta``. Devuelve ``None`` si el evento no
+    tiene verificación asociada, para no inventar un estado.
+    """
+    try:
+        detalle = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(detalle, dict):
+        return None
+    info = detalle.get("verificacion")
+    if isinstance(info, dict):
+        estado = str(info.get("estado") or "")
+        motivo = str(info.get("motivo") or "")
+        if estado == "no_verificable":
+            return {"clase": "", "texto": "no verificable", "motivo": motivo}
+        if estado == "sin_respuesta":
+            return {"clase": "warn", "texto": "sin respuesta", "motivo": motivo}
+        if estado:
+            return {"clase": "ok", "texto": estado, "motivo": motivo}
+    # El texto plano es el formato histórico de "confirmó/descartó": la
+    # etiqueta "verificado" la sigue dando la columna `verified`.
+    return None
+
+
 def create_app(cfg: Config) -> Flask:
     db.initialize(cfg.paths.db)
     caps = caps_mod.probe()
@@ -150,6 +179,10 @@ def create_app(cfg: Config) -> Flask:
             return json.dumps(json.loads(raw or "{}"), indent=2, ensure_ascii=False)
         except (json.JSONDecodeError, TypeError):
             return str(raw or "")
+
+    @app.template_filter("verif")
+    def _fmt_verif(raw):  # noqa: ANN001
+        return verification_label(raw)
 
     # ------------------------------------------------------------- autenticación
     @app.route("/login", methods=["GET", "POST"])

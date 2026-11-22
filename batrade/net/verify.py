@@ -52,3 +52,21 @@ def interpret(macs: set[str] | None, expected: str | None) -> tuple[bool | None,
     if expected and only == expected:
         return False, f"Sólo respondió la MAC esperada ({only}): posible falso positivo."
     return False, f"Sólo respondió una MAC ({only}), distinta de la esperada ({expected})."
+
+
+# Estados del bloque ``detalle_json.verificacion``. Distinguen "no verificado"
+# de "no verificable": en el primer caso nunca hubo intento, en el segundo el
+# sensor no pudo intentarlo (sin CAP_NET_RAW).
+ESTADO_NO_VERIFICABLE = "no_verificable"
+ESTADO_SIN_RESPUESTA = "sin_respuesta"
+ESTADO_CONFIRMADO = "confirmado"
+ESTADO_DESCARTADO = "descartado"
+
+
+def estado_verificacion(macs: set[str] | None, confirmado: bool | None) -> str:
+    """Estado legible de la comprobación a partir de lo que respondió la red."""
+    if macs is None:
+        return ESTADO_NO_VERIFICABLE
+    if not macs:
+        return ESTADO_SIN_RESPUESTA
+    return ESTADO_CONFIRMADO if confirmado else ESTADO_DESCARTADO

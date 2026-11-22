@@ -36,9 +36,11 @@
       <tr>
         <td><span class="chip {{ e['severidad'] }}">{{ sev_label[e['severidad']] }}</span></td>
         <td>
+          {% set v = e["detalle_json"]|verif %}
           <details>
-            <summary>{{ e["tipo"] }}{% if e["verified"] %} <span class="tag ok">verificado</span>{% endif %}</summary>
+            <summary>{{ e["tipo"] }}{% if e["verified"] %} <span class="tag ok">verificado</span>{% elif v %} <span class="tag {{ v['clase'] }}">{{ v["texto"] }}</span>{% endif %}</summary>
             <div class="detail">
+              {% if v and v["motivo"] %}<p class="muted small">Verificación: {{ v["texto"] }} — {{ v["motivo"] }}</p>{% endif %}
               {% set d = e["detalle_json"] %}
               <pre>{{ d|json_pretty }}</pre>
               <small class="muted">clave: {{ e["clave_dedupe"] }} ·
