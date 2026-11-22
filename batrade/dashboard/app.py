@@ -15,17 +15,20 @@ import secrets
 import sqlite3
 from datetime import datetime
 from functools import wraps
+from typing import TYPE_CHECKING
 
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    session, url_for)
 
 from batrade import db, store
-from batrade.config import Config
 from batrade.inventory import approve_baseline, review_candidates
 from batrade.inventory import status as baseline_status
 from batrade.net import caps as caps_mod
 from batrade.net.iputil import ip_in_cidr, now_ms, valid_ipv4
 from batrade.net.nmap_scan import udp_risky_ports
+
+if TYPE_CHECKING:  # sólo para anotaciones: `from __future__ import annotations`
+    from batrade.config import Config
 
 TRUST_LABEL = {"confiable": "Confiable", "desconocido": "Desconocido",
                "no_autorizado": "No autorizado"}

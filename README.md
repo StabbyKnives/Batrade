@@ -11,6 +11,7 @@ Batrade is a passive intrusion detection system for home and small-office networ
 - Router reboots (gateway MAC change)
 - New or unauthorized devices joining the network
 - Risky open ports on known devices (Telnet, RDP, VNC, UPnP, and others)
+- Risky UDP services (UPnP/SSDP 1900, mDNS 5353) when `CAP_NET_RAW` is available; in degraded mode the panel states that UDP cannot be verified
 
 ## Supported distributions
 
@@ -200,6 +201,42 @@ Check what mode will be used and why:
 batrade doctor
 ```
 
+## Port scans, UDP coverage and scheduling
+
+`scan` in `config.yaml` controls both what nmap does and when it runs:
+
+| Key | Default | Effect |
+|---|---|---|
+| `enabled` | `true` | Enables the scan workers and automatic scheduling |
+| `max_concurrent` | `2` | Simultaneous nmap processes; also the per-sweep budget for weekly rescans |
+| `timing` | `-T3` | nmap timing template |
+| `standard_timeout` | `300` | Process timeout of the `standard` profile (capped at 300 s) |
+| `quick_timeout` | `120` | Process timeout of the `quick` profile |
+| `quick_periodic_hours` | `24` | A device whose last scan is older than this gets a `quick` rescan |
+| `weekly_rescan_days` | `7` | Trusted (`confiable`) devices get a new `standard` scan after this many days (RF-10) |
+| `risky_ports` | 10-port catalogue | `{port, protocol, service, reason}`; `protocol` is mandatory |
+
+Scheduling happens after each sweep: a device seen for the first time gets a `standard` scan; an overdue trusted device gets a new `standard`; anything else overdue gets a `quick`. Weekly rescans are staggered — at most `max_concurrent` per sweep, oldest first — so a network that was offline for a week does not fire a burst of nmap processes. In-flight jobs are coalesced by `(address, profile)`, and the same pair requested from the dashboard cannot be queued twice.
+
+UDP ports of the catalogue are scanned with a second, tightly bounded nmap pass (`-sU -p U:<catalogue> --host-timeout 30s --max-retries 1`) only when the sensor has `CAP_NET_RAW`. Only ports reported `open` are stored: `open|filtered` is the normal outcome for UDP without a reply and would produce false positives. Without raw capture the pass is skipped, the sensor logs the limitation once per scan, and `/health` shows *"UDP no verificable sin CAP_NET_RAW"*. A protocol that was not scanned never marks its known ports as closed.
+
+## Data retention
+
+The sensor purges once an hour, using `sensor.retention_days` (default 90):
+
+- `events` older than the cutoff (`last_ts`);
+- finished `scans` rows and their nmap XML files under `paths.scans_dir`;
+- `device_history` presence rows;
+- `notification_queue` rows already `enviado` or `agotado`.
+
+Pending notifications are never removed: a network outage must not lose alerts. XML files are deleted only after resolving the real path and confirming it stays inside `paths.scans_dir`; a manipulated path or a symlink pointing elsewhere is ignored and logged, and a missing file is tolerated.
+
+## Database schema and migrations
+
+The schema is versioned with `PRAGMA user_version` and an ordered `MIGRATIONS` list in `batrade/db.py`. `SCHEMA_VERSION` is derived from that list, so there is a single source of truth. On startup (`init`, `doctor`, sensor, dashboard) only the pending migrations are applied, each one in its own transaction together with the version bump: a migration that fails leaves the schema and the version untouched. Migrations are additive and idempotent (`CREATE ... IF NOT EXISTS`, guarded `ALTER TABLE ADD COLUMN`).
+
+Before migrating an existing database with data, a backup is written next to it as `<db>.bak-v<N>` with mode `600`; an existing backup is never overwritten (`-2`, `-3`, … are appended). A brand-new database receives every migration and ends at the latest version. `batrade init` and `batrade doctor` print the schema version actually stored in the file.
+
 ## CLI reference
 
 ```
@@ -255,7 +292,7 @@ Install them with:
 sudo bash install.sh --systemd
 ```
 
-The installer rewrites `WorkingDirectory`, `ReadWritePaths` and `ExecStart` for the real install path and the Python being used (system or `.venv`). It also creates the `batrade` service user when missing and gives it ownership of `var/`. The recommended install path is `/opt/batrade`; systemd hardening sets `ProtectHome=true`, so a project under `/home` cannot be used by the service.
+The installer rewrites `WorkingDirectory`, `ReadWritePaths` and `ExecStart` for the real install path and the Python being used (system or `.venv`). It also creates the `batrade` service user when missing and gives it ownership of `var/`. The recommended install path is `/opt/batrade`; systemd hardening sets `ProtectHome=true`, so a project under `/home` cannot be used by the service — with the repository in your home directory, use `batrade start` / `batrade stop` (or move it to `/opt/batrade`) instead of installing the units.
 
 If the dashboard is exposed beyond loopback, set `DASHBOARD_TOKEN` in `.env` to require token authentication.
 
@@ -276,7 +313,7 @@ pip install -e ".[dev]"    # pytest; on distribution-managed systems use a venv
 python3 -m pytest
 ```
 
-Tests cover the detection engine, detection rules, inventory logic, notification queue, database store, dashboard routes, configuration loading, interface auto-detection and network utilities. They run entirely offline using synthetic observations and fixtures from `fixtures/pcaps/`.
+Tests cover the detection engine, detection rules, inventory logic, notification queue, database store, dashboard routes, configuration loading, interface auto-detection, schema migrations, scan scheduling, UDP parsing and retention. They run entirely offline and without privileges, using synthetic observations and the fixtures in `fixtures/pcaps/` and `fixtures/nmap/`. CI runs the suite on Python 3.11, 3.12 and 3.13 (`.github/workflows/tests.yml`).
 
 ## Project layout
 
@@ -287,7 +324,7 @@ batrade/           Python package
   sensor.py        Monitoring daemon (multi-threaded)
   inventory.py     Device tracking and trust management
   notify.py        Alert dispatch with retry and deduplication
-  db.py            SQLite schema and initialization
+  db.py            SQLite schema, versioned migrations and connections
   store.py         Data access layer
   config.py        Configuration loading and validation
   events.py        Finding persistence helpers
@@ -313,6 +350,7 @@ batrade/           Python package
     static/        CSS
 deploy/            Systemd service units
 fixtures/pcaps/    Recorded network captures for tests
+fixtures/nmap/     Synthetic nmap XML fixtures (UDP pass)
 scripts/           Development utilities
 tests/             pytest test suite
 config.yaml        Main configuration

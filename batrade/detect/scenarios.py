@@ -107,13 +107,11 @@ def _arp_spoof(c: ScenarioContext, ts: int) -> list[Observation]:
 
 def _arp_sweep(c: ScenarioContext, ts: int) -> list[Observation]:
     obs: list[Observation] = []
-    net = ipaddress.IPv4Network("0.0.0.0/0")
     base = ipaddress.IPv4Address(c.victim_ip)
     for i in range(40):
         target = str(base + i + 1)
         obs.append(_arp(c, ts + i * 120, ip_src=c.attacker_ip, mac_src=c.attacker_mac,
                         ip_dst=target, mac_dst="00:00:00:00:00:00", op="request"))
-    del net
     return obs
 
 

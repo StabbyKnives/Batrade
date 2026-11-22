@@ -15,6 +15,7 @@ import json
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from batrade import __version__, db, store
@@ -117,6 +118,24 @@ def main(argv: list[str] | None = None) -> int:
 # --------------------------------------------------------------------------- #
 # Comandos
 # --------------------------------------------------------------------------- #
+def _human_ms(ms: int) -> str:
+    """Fecha y hora legibles de un epoch en milisegundos."""
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    except (OverflowError, OSError, ValueError):
+        return "fecha inválida"
+
+
+def _heartbeat_label(hb, stale_after_s: int = 45) -> str:
+    """Latido del sensor como fecha, edad y estado (nunca un epoch desnudo)."""
+    if hb is None:
+        return "nunca"
+    ts = int(hb["ts"])
+    edad = max(0, (store_now() - ts) // 1000)
+    aviso = f"  ·  sin latido reciente (>{stale_after_s} s)" if edad > stale_after_s else ""
+    return f"{_human_ms(ts)}  (hace {edad} s){aviso}"
+
+
 def cmd_doctor(cfg: Config, _args) -> int:
     caps = caps_mod.probe()
     mode, notes = caps_mod.resolve_mode(cfg.sensor.mode, caps)
@@ -146,7 +165,7 @@ def cmd_doctor(cfg: Config, _args) -> int:
     print(f"  base de datos   : {cfg.paths.db}  schema v{version}{pendiente}")
     print(f"  dispositivos    : {rows.get('total', 0)} "
           f"(en línea {rows.get('online', 0)}, desconocidos {rows.get('desconocidos', 0)})")
-    print(f"  heartbeat       : {'nunca' if hb is None else hb['ts']}")
+    print(f"  heartbeat       : {_heartbeat_label(hb, cfg.sensor.heartbeat_interval * 3)}")
     for note in cfg.warnings:
         print(f"  aviso           : {note}")
     for note in notes:
