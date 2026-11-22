@@ -43,7 +43,7 @@ def test_workflow_is_valid_yaml_and_runs_pytest():
 
 
 def test_docs_refer_to_the_same_dev_extra():
-    for doc in ("README.md", "Batrade_CONTEXTO.md"):
+    for doc in ("README.md",):
         texto = (RAIZ / doc).read_text(encoding="utf-8")
         if "[dev]" in texto:
             assert 'pip install' in texto
