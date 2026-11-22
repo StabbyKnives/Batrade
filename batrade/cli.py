@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import os
+import pwd
 import sys
 import time
 from datetime import datetime
@@ -158,6 +159,49 @@ def _heartbeat_label(hb, stale_after_s: int = 45) -> str:
     return f"{_human_ms(ts)}  (hace {edad} s){aviso}"
 
 
+def whoami() -> str:
+    """Usuario efectivo del proceso, con su uid."""
+    uid = os.geteuid()
+    try:
+        nombre = pwd.getpwuid(uid).pw_name
+    except (KeyError, OSError):
+        nombre = "desconocido"
+    return f"{nombre} (uid {uid})"
+
+
+def var_owner_warning(var_dir: Path, euid: int | None = None) -> str | None:
+    """Avisa si el CLI corre como root sobre un `var/` de otro usuario.
+
+    El CLI lanzado con sudo crea PIDs, logs, XML y copias a nombre de root. No
+    se hace `chown` automático (sería invasivo); `doctor` lo advierte para que
+    el operador decida entre usar el mismo usuario o arreglar la propiedad.
+    """
+    euid = os.geteuid() if euid is None else euid
+    if euid != 0:
+        return None
+    try:
+        info = Path(var_dir).stat()
+    except OSError:
+        return None
+    if info.st_uid == 0:
+        return None
+    try:
+        dueno = pwd.getpwuid(info.st_uid).pw_name
+    except (KeyError, OSError):
+        dueno = f"uid {info.st_uid}"
+    return (f"var/ pertenece a {dueno} y el CLI corre como root: los archivos nuevos "
+            "quedarán a nombre de root (usa el mismo usuario o revisa la propiedad)")
+
+
+def mode_hint(caps, mode: str) -> str | None:
+    """Pista sobre privilegios: qué falta para el modo live."""
+    if mode == "live":
+        return None
+    if not caps.raw_capture:
+        return "sin CAP_NET_RAW: modo degradado; para 'live' ejecuta con sudo"
+    return None
+
+
 def cmd_doctor(cfg: Config, _args) -> int:
     caps = caps_mod.probe()
     mode, notes = caps_mod.resolve_mode(cfg.sensor.mode, caps)
@@ -175,6 +219,7 @@ def cmd_doctor(cfg: Config, _args) -> int:
           f"{'  (derivada)' if cfg.cidr_auto else ''}")
     print(f"  gateway         : {cfg.network.gateway_ip or default_gateway() or 'desconocido'}")
     print(f"  modo solicitado : {cfg.sensor.mode}  ->  efectivo: {mode}")
+    print(f"  ejecutando como : {whoami()}")
     print(f"  CAP_NET_RAW     : {'sí' if caps.raw_capture else 'NO'}")
     print(f"  arp-scan        : {'sí' if caps.arp_scan else 'NO'}   "
           f"nmap: {'sí' if caps.nmap else 'NO'}   "
@@ -188,6 +233,12 @@ def cmd_doctor(cfg: Config, _args) -> int:
     print(f"  dispositivos    : {rows.get('total', 0)} "
           f"(en línea {rows.get('online', 0)}, desconocidos {rows.get('desconocidos', 0)})")
     print(f"  heartbeat       : {_heartbeat_label(hb, cfg.sensor.heartbeat_interval * 3)}")
+    pista = mode_hint(caps, mode)
+    if pista:
+        print(f"  pista           : {pista}")
+    aviso_var = var_owner_warning(cfg.paths.db.parent)
+    if aviso_var:
+        print(f"  aviso           : {aviso_var}")
     for note in cfg.warnings:
         print(f"  aviso           : {note}")
     for note in notes:
@@ -282,6 +333,8 @@ def cmd_restart(cfg: Config, args) -> int:
 def cmd_status(cfg: Config, _args) -> int:
     from batrade.daemon import status_all
 
+    caps = caps_mod.probe()
+    mode, notes = caps_mod.resolve_mode(cfg.sensor.mode, caps)
     for info in status_all(cfg):
         print(f"  {info.name:<10} {info.state()}")
         print(f"  {'':<10} log: {info.logfile}")
@@ -297,6 +350,13 @@ def cmd_status(cfg: Config, _args) -> int:
     except Exception:  # base inexistente o aún sin latido
         age = None
     print(f"  {'latido':<10} {'sin datos' if age is None else f'hace {age} s'}")
+    print(f"  {'usuario':<10} {whoami()}")
+    print(f"  {'modo':<10} {mode}")
+    for note in notes:
+        print(f"  {'':<10} {note}")
+    pista = mode_hint(caps, mode)
+    if pista:
+        print(f"  {'':<10} {pista}")
     print(f"  {'panel':<10} http://{cfg.dashboard.host}:{cfg.dashboard.port}")
     return 0
 

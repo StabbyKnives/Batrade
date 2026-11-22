@@ -332,6 +332,18 @@ The installer rewrites `WorkingDirectory`, `ReadWritePaths` and `ExecStart` for 
 
 If the dashboard is exposed beyond loopback, set `DASHBOARD_TOKEN` in `.env` to require token authentication.
 
+**Pick one control plane per installation.** If `batrade-sensor.service` (or the dashboard unit) is active, `batrade start` and `batrade restart` refuse to run and tell you to use `systemctl` or stop the unit first: two sensors over the same database would mean two writers. `batrade status` and `batrade doctor` show the effective user, the real mode and, when `CAP_NET_RAW` is missing, the hint to run with `sudo` for `live`.
+
+For a first real test on a VM the simplest setup is **CLI as root and no systemd**:
+
+```bash
+sudo batrade start          # starts sensor + dashboard with root privileges
+sudo batrade status
+sudo batrade stop
+```
+
+When you later move to systemd, stop the CLI-managed components first (or use `--system` on a prefix outside `/home`), because `ProtectHome=true` prevents reading a project under your home directory.
+
 ## Troubleshooting
 
 - **`network.interface inexistente`** — run `batrade interfaces` and copy a real name, or leave `interface: auto`.

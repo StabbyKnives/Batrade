@@ -49,6 +49,7 @@ def test_stop_component_terminates_our_child(cfg):
 
 
 def test_start_is_idempotent(cfg, monkeypatch):
+    monkeypatch.setattr(daemon, "systemd_unit_active", lambda unit: False)
     monkeypatch.setattr(daemon, "pid_of", lambda cfg, name: 4242)
     info, message = daemon.start_component(cfg, cfg.root / "config.yaml", "sensor")
     assert info.pid == 4242
@@ -70,6 +71,7 @@ def test_start_spawns_detached_child(cfg, monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(daemon, "START_VERIFY_S", 0)
+    monkeypatch.setattr(daemon, "systemd_unit_active", lambda unit: False)
     monkeypatch.setattr(daemon.subprocess, "Popen", fake_popen)
 
     info, message = daemon.start_component(
@@ -90,6 +92,7 @@ def test_start_reports_early_death(cfg, monkeypatch):
             return 7
 
     monkeypatch.setattr(daemon, "START_VERIFY_S", 0)
+    monkeypatch.setattr(daemon, "systemd_unit_active", lambda unit: False)
     monkeypatch.setattr(daemon.subprocess, "Popen",
                         lambda argv, **kwargs: DeadProc())
     with pytest.raises(daemon.DaemonError) as exc:

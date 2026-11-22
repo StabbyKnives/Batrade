@@ -29,6 +29,34 @@ class DaemonError(RuntimeError):
     """El proceso no arrancó o no se pudo controlar."""
 
 
+def systemd_unit_active(unit: str) -> bool:
+    """¿systemd considera la unidad activa? Tolera hosts sin systemd.
+
+    Se usa al arrancar por CLI para no dejar dos sensores escribiendo la misma
+    base. ``is-active --quiet`` devuelve 0 sólo si la unidad está activa.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", unit],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def ensure_no_systemd(name: str) -> None:
+    """Niega el arranque por CLI si el servicio systemd del componente está activo."""
+    unit = f"batrade-{name}.service"
+    if not systemd_unit_active(unit):
+        return
+    raise DaemonError(
+        f"{unit} está activo: no se arranca otra instancia por CLI (dos sensores "
+        f"sobre la misma base). Usa 'sudo systemctl restart {unit}' o detén la "
+        f"unidad con 'sudo systemctl stop {unit}' antes de usar esta orden."
+    )
+
+
 @dataclass(slots=True)
 class ProcInfo:
     name: str
@@ -135,6 +163,9 @@ def start_component(cfg: Config, config_path: Path, name: str,
     """Lanza un componente en segundo plano. Idempotente."""
     if name not in COMPONENTS:
         raise ValueError(f"componente desconocido: {name}")
+    # Dos sensores sobre la misma base: nunca. Si el servicio systemd está
+    # activo, el operador debe usar systemctl (o pararlo) en vez de esta orden.
+    ensure_no_systemd(name)
     existing = pid_of(cfg, name)
     info = ProcInfo(name=name, pid=existing, alive=existing is not None,
                     pidfile=pidfile(cfg, name), logfile=logfile(cfg, name))
