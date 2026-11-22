@@ -12,3 +12,4 @@ build/
 *.egg-info/
 .venv/
 CONTEXT.md
+REPORTE_SANEAMIENTO.md
