@@ -37,9 +37,11 @@ Commits (uno por fase):
 | 4 | `abe203b` | Distinguir no verificado de no verificable en la verificación ARP |
 | 5 | `39db855` | Completar la retención: cola de notificación y XML de escaneos |
 | 6 | `71d060e` | Acotar las sondas ARP y añadir integración continua |
-| 7 | `3f9488f` | Pulir diagnóstico y documentación (código, tests y README; el reporte va en el commit de documentación posterior) |
+| 7 | `3f9488f` | Pulir diagnóstico y documentación (código, tests y README) |
 
 Base: `3675a39` *Add network auto-detection and daemon lifecycle support*.
+Este reporte se añadió en el commit `f884054`; cualquier ajuste posterior de este archivo
+solo le afecta a él y no cambia el código de las fases.
 
 ## 3. Tabla por fase
 
