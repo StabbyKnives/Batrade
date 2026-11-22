@@ -13,15 +13,17 @@
 |---|---|
 | Proyecto | Batrade Home-SOC (`batrade`), versión `0.1.0` (subida a `0.2.0` pendiente de aprobación) |
 | Ruta local del repo | `/home/techxicn_/code/Batrade` |
-| Rama de trabajo | `chore/saneamiento-v0.2` (6 commits de código sobre `dev`/`3675a39`) |
+| Rama de trabajo | `chore/vm-install-reset`, partida de `chore/saneamiento-v0.2` |
+| Rama base real | `dev`, que apunta al mismo commit que `main` y que `origin/main` (`3675a39`); el saneamiento anterior no se fusionó |
 | Commit base | `3675a39` — *Add network auto-detection and daemon lifecycle support* |
+| Commits de la rama | 17 desde `3675a39` hasta `b8fc674`: **14 de código** y **3 de documentación** (`git rev-list --count 3675a39..HEAD`); el reporte de la iteración de instalación es el 18 |
 | Estado del árbol | limpio (solo artefactos ignorados: `var/`, `.venv/`, `__pycache__/`) |
 | Lenguaje | Python ≥ 3.11 (verificado con 3.14.10 en `.venv`; CI en 3.11/3.12/3.13) |
 | Framework web | Flask ≥ 3.0 |
 | Persistencia | SQLite en modo WAL (un solo archivo), esquema v2 con migraciones versionadas |
-| Pruebas | 196+ tests en verde, sin red ni privilegios, con CI por matriz de Python |
+| Pruebas | 273 tests en verde (+2 omitidos por falta de `shellcheck`), sin red ni privilegios, CI por matriz de Python |
 | Host de referencia | Fedora Linux 44, GNOME/Wayland, interfaz Wi-Fi `wlp2s0` |
-| Documento actualizado | 2026-11-22 (saneamiento v0.2) |
+| Documento actualizado | 2026-11-22 (instalación de sistema, reset y pruebas en VM) |
 
 ---
 
@@ -87,7 +89,7 @@ Comprobado ejecutando comandos en esta máquina, no inferido de la documentació
 
 | Comprobación | Resultado |
 |---|---|
-| `python -m pytest` en `.venv` | **196 passed** (base previa: 134) |
+| `python -m pytest` en `.venv` | **273 passed, 2 skipped** (base previa al saneamiento: 134) |
 | Versión del paquete | `batrade 0.1.0` (renombrado a `0.2.0` pendiente de aprobación) |
 | Python del venv | 3.14.10 |
 | Dependencias importables | `flask 3.1.3`, `scapy 2.8.0`, `PyYAML`, `requests`, `defusedxml` |
@@ -98,6 +100,8 @@ Comprobado ejecutando comandos en esta máquina, no inferido de la documentació
 | Modo efectivo registrado | `degraded` (heartbeat `state=stopped`, sin `CAP_NET_RAW`) |
 | Línea base | `learning_complete=1`, aprobada; gateway aprendido; interfaz `wlp2s0` |
 | Integración continua | `.github/workflows/tests.yml` (pytest en 3.11, 3.12 y 3.13) |
+| Instalación de sistema | `install.sh --system` → `/opt/batrade` + wrapper en `/usr/local/bin` (probada con `--dry-run` y prefijos temporales) |
+| Limpieza de datos | `batrade reset-db` (solo root y CLI; nunca en el panel) |
 
 Notas de estado:
 
@@ -1353,6 +1357,7 @@ La retención elimina los XML de los escaneos purgados, siempre dentro de `paths
 
 ---
 
-*Fin del documento. Actualizado tras el saneamiento v0.2 (rama `chore/saneamiento-v0.2`,
-seis commits sobre `3675a39`), con verificación de la suite de pruebas (201/201), de
-`batrade doctor` y del entorno de ejecución de la máquina de referencia.*
+*Fin del documento. Actualizado tras la instalación de sistema, el comando `reset-db` y la
+guía de pruebas en VM (rama `chore/vm-install-reset`, 17 commits hasta `b8fc674` sobre
+`3675a39`), con verificación de la suite de pruebas (273/273), de `batrade doctor` y del
+entorno de ejecución de la máquina de referencia.*
