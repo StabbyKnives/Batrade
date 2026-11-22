@@ -331,6 +331,21 @@ def close_scan_request(conn: sqlite3.Connection, req_id: int, estado: str,
     )
 
 
+def last_scan_ts(conn: sqlite3.Connection, device_id: int, perfil: str,
+                 only_ok: bool = True) -> int | None:
+    """Fin del último escaneo completado de ese perfil para un equipo (RF-10).
+
+    Se consulta la tabla ``scans`` y no ``devices.last_scan_ts`` porque este
+    último sólo recuerda el escaneo más reciente, sea cual sea su perfil.
+    """
+    sql = "SELECT MAX(fin) AS ts FROM scans WHERE device_id = ? AND perfil = ?"
+    params: list[Any] = [device_id, perfil]
+    if only_ok:
+        sql += " AND estado = 'ok'"
+    row = conn.execute(sql, params).fetchone()
+    return int(row["ts"]) if row is not None and row["ts"] is not None else None
+
+
 # --------------------------------------------------------------------------- #
 # Eventos, dedupe y cola de notificación
 # --------------------------------------------------------------------------- #

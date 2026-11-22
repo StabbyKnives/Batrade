@@ -36,6 +36,21 @@ PROFILE_TIMEOUT = {"quick": 120, "standard": 300, "vuln": 900}
 HOST_TIMEOUT = {"quick": "60s", "standard": "120s", "vuln": "300s"}
 
 
+def profile_timeout(cfg: Config, profile: str) -> int:
+    """Límite de proceso del perfil, respetando ``scan.*_timeout`` del YAML.
+
+    ``quick_timeout`` sustituye al valor fijo de 120 s del perfil rápido; el
+    perfil ``standard`` mantiene su tope histórico y ``vuln`` es siempre el más
+    largo porque ejecuta scripts.
+    """
+    default = PROFILE_TIMEOUT.get(profile, 300)
+    if profile == "quick":
+        return max(1, int(cfg.scan.quick_timeout))
+    if profile == "standard":
+        return max(1, min(default, int(cfg.scan.standard_timeout)))
+    return default
+
+
 class ScanError(RuntimeError):
     pass
 
@@ -82,8 +97,7 @@ def run_scan(cfg: Config, target: str, profile: str = "standard",
 
     xml_path = cfg.paths.scans_dir / f"scan-{profile}-{target}-{int(time.time())}.xml"
     argv = build_argv(cfg, target, profile, caps, xml_path)
-    limit = timeout or min(PROFILE_TIMEOUT[profile], cfg.scan.standard_timeout
-                           if profile == "standard" else PROFILE_TIMEOUT[profile])
+    limit = timeout or profile_timeout(cfg, profile)
     start = now_ms()
     result = ScanResult(target=target, profile=profile, xml_path=str(xml_path), cmd=argv)
 

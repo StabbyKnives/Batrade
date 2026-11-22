@@ -40,8 +40,6 @@ from batrade.notify import Notifier
 
 log = logging.getLogger("batrade.sensor")
 
-QUICK_RESCAN_MS = 24 * 3600 * 1000
-
 
 @dataclass(slots=True)
 class ScanJob:
@@ -291,23 +289,56 @@ class Sensor:
             store.set_meta(conn, "gateway_ip", gw, ts)
 
     def _schedule_scans(self, conn, hosts: dict[str, str], ts: int) -> None:
+        """Programa los escaneos automáticos (RF-07, RF-10).
+
+        - Primer avistamiento de un equipo -> perfil ``standard``.
+        - Equipo ``confiable`` cuyo último ``standard`` correcto supera
+          ``scan.weekly_rescan_days`` -> ``standard`` otra vez, pero
+          escalonado: como mucho ``scan.max_concurrent`` por barrido y del más
+          atrasado al más reciente, para no lanzar una ráfaga tras un periodo
+          apagado.
+        - Cualquier equipo cuyo último escaneo supera
+          ``scan.quick_periodic_hours`` -> ``quick``.
+
+        El coalescing lo hacen ``_pending`` (misma IP+perfil en vuelo) y el
+        índice único parcial de ``scan_requests``.
+        """
         if not self.cfg.scan.enabled:
             return
+        quick_ms = int(self.cfg.scan.quick_periodic_hours) * 3600_000
+        weekly_ms = int(self.cfg.scan.weekly_rescan_days) * 86400_000
+        atrasados: list[tuple[int, str, int]] = []
+
         for ip in hosts:
             if ip == self.sensor_ip:
                 continue
             device = store.get_device_by_ip(conn, ip)
             if device is None:
                 continue
+            device_id = int(device["id"])
             last = device["last_scan_ts"]
             if last is None:
-                profile = "standard"
-            elif ts - int(last) > QUICK_RESCAN_MS:
-                profile = "quick"
-            else:
+                self._enqueue_scan(ScanJob(ip=ip, profile="standard", device_id=device_id),
+                                   origin="auto")
                 continue
-            self._enqueue_scan(ScanJob(ip=ip, profile=profile,
-                                       device_id=int(device["id"])), origin="auto")
+            if device["estado_confianza"] == "confiable":
+                last_standard = store.last_scan_ts(conn, device_id, "standard")
+                if last_standard is None or ts - last_standard > weekly_ms:
+                    atrasados.append((last_standard or 0, ip, device_id))
+                    continue
+            if ts - int(last) > quick_ms:
+                self._enqueue_scan(ScanJob(ip=ip, profile="quick", device_id=device_id),
+                                   origin="auto")
+
+        if not atrasados:
+            return
+        presupuesto = max(1, int(self.cfg.scan.max_concurrent))
+        for _ultimo, ip, device_id in sorted(atrasados):
+            if presupuesto <= 0:
+                break
+            if self._enqueue_scan(ScanJob(ip=ip, profile="standard", device_id=device_id),
+                                  origin="auto"):
+                presupuesto -= 1
 
     # ------------------------------------------------------- detección pasiva
     def _on_neighbor(self, obs: Observation) -> None:

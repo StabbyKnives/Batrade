@@ -420,6 +420,12 @@ def load_config(path: str | Path = "config.yaml", root: str | Path | None = None
         errors.append("detect.syn_ports_warn debe ser menor que detect.syn_ports_crit")
     if detect.cooldown_s < 0:
         errors.append("detect.cooldown_s no puede ser negativo")
+    if scan.quick_timeout < 1:
+        errors.append(f"scan.quick_timeout debe ser >= 1: {scan.quick_timeout}")
+    if scan.quick_periodic_hours < 1:
+        errors.append(f"scan.quick_periodic_hours debe ser >= 1: {scan.quick_periodic_hours}")
+    if scan.weekly_rescan_days < 1:
+        errors.append(f"scan.weekly_rescan_days debe ser >= 1: {scan.weekly_rescan_days}")
     if not 1 <= dashboard.port <= 65535:
         errors.append(f"dashboard.port inválido: {dashboard.port}")
     if dashboard.host not in ("127.0.0.1", "localhost", "::1") and not dashboard.auth_token:
