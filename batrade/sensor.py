@@ -43,6 +43,34 @@ from batrade.notify import Notifier
 log = logging.getLogger("batrade.sensor")
 
 
+def safe_unlink_scan(scans_dir: str | Path, candidate: str | Path) -> bool:
+    """Elimina un XML de escaneo sólo si está realmente dentro de ``scans_dir``.
+
+    La ruta viene de la base de datos, así que se resuelve (siguiendo enlaces
+    simbólicos) y se comprueba la contención: un valor manipulado como
+    ``../../etc/passwd`` o un symlink que apunta fuera nunca se borra. Un
+    archivo ya inexistente se tolera sin error.
+    """
+    try:
+        base = Path(scans_dir).resolve()
+        path = Path(candidate).resolve()
+    except (OSError, RuntimeError):  # ruta imposible o bucle de symlinks
+        log.warning("XML de escaneo con ruta no resoluble; se ignora")
+        return False
+    if path.suffix.lower() != ".xml" or path == base or not path.is_relative_to(base):
+        log.warning("XML de escaneo fuera de %s; no se borra %s",
+                    base.name, path.name)
+        return False
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+        return True
+    except OSError as exc:
+        log.warning("no se pudo borrar %s: %s", path.name, exc)
+        return False
+
+
 @dataclass(slots=True)
 class ScanJob:
     ip: str
@@ -212,8 +240,7 @@ class Sensor:
                     self.engine.prune(ts)
                     last_prune = ts
                 if ts - last_purge > 3600_000:
-                    cutoff = ts - self.cfg.sensor.retention_days * 86400_000
-                    purged = store.purge(conn, cutoff)
+                    purged = self._purge_retention(conn, ts)
                     last_purge = ts
                     if any(purged.values()):
                         log.info("purga de retención", extra={"fields": purged})
@@ -229,6 +256,16 @@ class Sensor:
 
     def _last_heartbeat(self) -> int:
         return getattr(self, "_hb_ts", 0)
+
+    def _purge_retention(self, conn, ts: int) -> dict:
+        """Purga por antigüedad y borra los XML de los escaneos eliminados."""
+        cutoff = ts - self.cfg.sensor.retention_days * 86400_000
+        purged = store.purge(conn, cutoff)
+        rutas = purged.pop("scan_xml", [])
+        purged["xml"] = sum(
+            1 for ruta in rutas if safe_unlink_scan(self.cfg.paths.scans_dir, ruta)
+        )
+        return purged
 
     def _heartbeat(self, conn, ts: int) -> None:
         self._hb_ts = ts

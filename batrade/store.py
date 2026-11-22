@@ -550,14 +550,40 @@ def tool_status(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return list(conn.execute("SELECT * FROM tool_status ORDER BY herramienta"))
 
 
-def purge(conn: sqlite3.Connection, before_ts: int) -> dict[str, int]:
-    """Retención: elimina eventos y escaneos antiguos (RNF-06)."""
-    events = conn.execute("DELETE FROM events WHERE last_ts < ?", (before_ts,)).rowcount
+def purge(conn: sqlite3.Connection, before_ts: int) -> dict[str, Any]:
+    """Retención: elimina datos y artefactos anteriores a ``before_ts`` (RNF-06).
+
+    Cubre eventos, escaneos terminados, historial de presencia y las
+    notificaciones ya enviadas o agotadas. **Nunca** toca la cola
+    ``pendiente``: un fallo de red no puede perder alertas por antigüedad.
+
+    Devuelve los contadores y, en ``scan_xml``, las rutas de los XML de los
+    escaneos purgados para que la capa que tiene acceso al sistema de archivos
+    (el sensor) los elimine dentro de ``paths.scans_dir``.
+    """
+    xml_rows = conn.execute(
+        "SELECT ruta_xml FROM scans WHERE fin IS NOT NULL AND fin < ? "
+        "AND ruta_xml IS NOT NULL",
+        (before_ts,),
+    ).fetchall()
     scans = conn.execute(
         "DELETE FROM scans WHERE fin IS NOT NULL AND fin < ?", (before_ts,)
     ).rowcount
+    # La cola se purga antes que los eventos: los eventos borrados arrastran sus
+    # filas por ON DELETE CASCADE y el contador dejaría de ser informativo.
+    notifications = conn.execute(
+        "DELETE FROM notification_queue WHERE ts < ? AND estado IN ('enviado','agotado')",
+        (before_ts,),
+    ).rowcount
+    events = conn.execute("DELETE FROM events WHERE last_ts < ?", (before_ts,)).rowcount
     history = conn.execute(
         "DELETE FROM device_history WHERE ts < ? AND evento IN ('conexion','desconexion','cambio_ip')",
         (before_ts,),
     ).rowcount
-    return {"events": events, "scans": scans, "history": history}
+    return {
+        "events": events,
+        "scans": scans,
+        "history": history,
+        "notifications": notifications,
+        "scan_xml": [str(r["ruta_xml"]) for r in xml_rows if r["ruta_xml"]],
+    }
