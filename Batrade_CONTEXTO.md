@@ -276,10 +276,10 @@ convención.
 |---|---|---|
 | `batrade/__init__.py` | `__version__ = "0.1.0"` | — |
 | `batrade/__main__.py` | `python -m batrade` → `cli.main()` | — |
-| `batrade/cli.py` | Subcomandos y salida humana | Único punto de entrada; nunca escribe SQL directo salvo `export` (lectura). |
+| `batrade/cli.py` | Subcomandos y salida humana | Único punto de entrada. `export` lee SQL directo; `reset-db` (sólo root) escribe a través de `store`. Resuelve la raíz como `--root` > `BATRADE_ROOT` > paquete instalado. |
 | `batrade/config.py` | Carga `.env` + `config.yaml`, resuelve red, valida, emite `warnings` | Lanza `ConfigError(errors: list[str])` con **todos** los problemas; no arranca a medias. |
 | `batrade/logging_setup.py` | JSONL rotado (2 MB × 5) + consola legible | Idempotente por componente. |
-| `batrade/db.py` | Esquema SQLite, `connect()`, `migrate()`, `recover_interrupted()`, `get_meta`/`set_meta`, `is_learning` | `SCHEMA_VERSION = 1`; `PRAGMA user_version`. |
+| `batrade/db.py` | Esquema SQLite, `connect()`, runner de `migrate()`, copias `backup`/`backup_tagged`, `recover_interrupted()`, `get_meta`/`set_meta`, `is_learning` | `SCHEMA_VERSION` derivada de `MIGRATIONS` (hoy 2); `PRAGMA user_version`. |
 | `batrade/store.py` | **Todo** el SQL de lectura/escritura | Ninguna otra capa escribe SQL. Sin ORM. Devuelve `sqlite3.Row`/`dict`. |
 | `batrade/events.py` | Persistencia común de `Finding` + hallazgos de fallo de herramienta | Único camino demo/replay/sensor. |
 | `batrade/inventory.py` | Altas, reconexiones, ausencias, confianza, línea base | `observe_host`, `apply_sweep`, `approve_baseline`, `review_candidates`, `status`. |
@@ -632,6 +632,10 @@ Solo tres, deliberadamente acotadas:
 
 El sensor es el único que escribe eventos, puertos y la cola de notificación.
 
+**El panel no puede reiniciar la base.** `reset-db` existe sólo en la CLI, exige root y un
+sensor detenido: es una acción manual y explícita, nunca automática y nunca accesible desde
+la web.
+
 ### Seguridad del panel
 
 - `SECRET_KEY` = SHA-256 del token si existe; si no, `secrets.token_hex(16)` por proceso.
@@ -678,6 +682,7 @@ Todas las rutas son relativas a la raíz del proyecto.
 | `timing` | `-T3` | Plantilla de timing de nmap. |
 | `standard_timeout` | 300 | Límite del perfil `standard` (tope histórico de 300 s). Valida ≥ 1. |
 | `quick_timeout` | 120 | Límite del perfil `quick` (`profile_timeout`). Valida ≥ 1. |
+| `udp_timeout` | 60 | `--host-timeout` de la pasada UDP; el proceso recibe este valor + 30 s. Valida ≥ 5. |
 | `quick_periodic_hours` | 24 | Horas tras las que un equipo recibe un reescaneo `quick` (RF-07). Valida ≥ 1. |
 | `weekly_rescan_days` | 7 | Días tras los que un equipo `confiable` recibe un `standard` (RF-10). Valida ≥ 1. |
 | `risky_ports` | catálogo de 10 puertos | Lista de `{port, protocol, service, reason}`; `protocol` obligatorio (`tcp`/`udp`). |
@@ -762,8 +767,9 @@ en `.gitignore` y el instalador lo crea con permisos 600.
 | `TELEGRAM_CHAT_ID` | `notify.py` | Chat/canal destino. |
 | `DISCORD_WEBHOOK` | `notify.py` | URL completa del webhook. |
 | `DASHBOARD_TOKEN` | `dashboard/app.py`, `config.py` | Exigido si el panel no escucha en loopback. |
+| `BATRADE_ROOT` | `cli.py` | Raíz del proyecto cuando se lanza desde otro directorio. La fija el wrapper de `install.sh --system`; `--root` tiene prioridad. |
 
-En esta máquina el archivo `.env` existe con las cuatro claves declaradas pero **vacías**
+En esta máquina el archivo `.env` existe con las cinco claves declaradas pero **vacías**
 (no hay credenciales configuradas), por lo que el único canal activo es `local`. Ese es
 también el estado del repo: `.env.example` documenta las claves y `.env` está ignorado.
 Cuando el operador las rellene, **no deben copiarse a documentos, prompts, commits ni
@@ -848,8 +854,15 @@ Comando TCP real: `nmap {-sS|-sT} -Pn <perfil> -T3 --host-timeout <t> -oX <xml> 
 invocación acotada:
 
 ```
-nmap -sU -Pn -p U:<puertos udp del catálogo> -T3 --host-timeout 30s --max-retries 1 -oX <xml> <target>
+nmap -sU -sV --version-light -Pn -p U:<puertos udp del catálogo> -T3 \
+     --host-timeout <scan.udp_timeout>s --max-retries 1 -oX <xml> <target>
 ```
+
+- `-sV --version-light` es obligatorio en la práctica: sin la sonda de servicio, SSDP y mDNS
+  se quedan casi siempre en `open|filtered` y la pasada no produciría ningún hallazgo real.
+  Con ella, un servicio que responde pasa a `open` y se guarda versión y producto.
+- `scan.udp_timeout` (60 s por defecto, mínimo 5) es el `--host-timeout`; el proceso de nmap
+  recibe ese valor **+ 30 s** de margen para alcanzar a escribir el XML.
 
 - Sólo se guardan los puertos en estado `open`. `open|filtered` es el resultado normal de
   UDP sin respuesta y **nunca** genera evento (evita falsos positivos).
@@ -888,12 +901,23 @@ El coalescing lo hacen `_pending` (una IP+perfil en vuelo) y el índice único p
 `scan_requests`. Los escaneos manuales del panel entran por `scan_requests` y los reclama
 el hilo principal.
 
-Al aplicar resultados (`store.apply_scan_ports(..., protocolos=...)`) se calcula el diff y
-se generan:
+Al aplicar resultados (`store.apply_scan_ports(..., protocolos=..., perfil=...)`) se calcula el
+diff y se generan:
 
-- `port_risky` (`warn`) para puertos del catálogo nuevos o que pasan a riesgosos (TCP y UDP).
-- `port_new` (`warn`) solo si el equipo es `confiable` y el puerto no estaba.
+- `port_risky` (`warn`) para puertos del catálogo nuevos, que pasan a riesgosos o que
+  **reaparecen tras un cierre real** (TCP y UDP).
+- `port_new` (`warn`) solo si el equipo es `confiable` y el puerto no estaba (o estaba
+  cerrado y ha vuelto).
 - Los puertos que desaparecen de un protocolo **explorado** pasan a `closed` (sin evento).
+
+**Cerrar un puerto es una afirmación y sólo la hacen `standard` y `vuln`.** `quick` usa `-F`
+(≈100 puertos TCP): su silencio sobre el resto no es evidencia de cierre, así que únicamente
+abre y actualiza. Sin esta regla se formaba el ciclo `standard → quick → standard`, en el que
+un puerto fuera del top 100 se marcaba `closed` en cada `quick` y volvía a abrirse después
+(el panel mentía; el evento `port_new` no se repetía porque `new_ports` exigía que no hubiera
+fila previa). Contrapartida asumida: un cierre real puede tardar hasta el siguiente
+`standard` (semanal por defecto) en reflejarse. Sin perfil explícito —llamadores internos y
+tests de diff— se conserva el comportamiento histórico de cerrar.
 
 ---
 
@@ -916,6 +940,31 @@ bash install.sh --venv --link    # enlaza `batrade` en ~/.local/bin (o /usr/loca
 Hace, en orden: distro/gestor → herramientas del sistema → Python ≥ 3.11 → venv opcional
 → verifica `yaml, flask, requests, defusedxml, scapy` → directorios + `.env` → `batrade init`
 → `interfaces` → `doctor` → systemd opcional → enlace opcional. No es destructivo.
+
+**Instalación de sistema (`--system`)**, pensada para una VM de pruebas:
+
+```bash
+sudo bash install.sh --system                       # destino /opt/batrade
+sudo bash install.sh --system --prefix /srv/batrade --dry-run
+sudo bash install.sh --system --install-deps --start
+sudo bash install.sh --uninstall [--purge --yes] [--dry-run]
+```
+
+- Exige root (`id -u == 0`); si no, dice «ejecuta con sudo» y sale con 1.
+- Copia el repo con `scripts/sync_tree.sh`, que excluye `.git`, `var/`, `.venv` y `.env` y
+  **no pisa** `config.yaml`, `.env` ni `var/` en una reinstalación (rsync con `--delete`
+  limitado por exclusiones; sin rsync usa `tar`, que no poda archivos obsoletos).
+- Crea `.venv` dentro del prefix, instala el paquete editable, genera `.env` (600) si falta,
+  ejecuta `init`, `interfaces` y `doctor`, y escribe un **wrapper** en `$BATRADE_BIN_DIR`
+  (por defecto `/usr/local/bin`) que fija `BATRADE_ROOT=<prefix>` y hace `exec` del binario
+  del venv: así funciona desde cualquier directorio y también con instalaciones no editables.
+  Avisa si ese directorio no está en `PATH` (sudo suele usar `secure_path`).
+- `--dry-run` imprime el plan sin crear ni modificar nada. `--start` arranca sensor y panel.
+- `--uninstall` se niega si hay un componente vivo, quita el wrapper y el código y conserva
+  `var/`, `.env` y `config.yaml`; `--purge` los borra tras exigir la palabra `BORRAR`
+  (`--yes` para automatizar).
+- `BATRADE_TEST_FAKE_ROOT=1` sólo existe para las pruebas del propio instalador: evita la
+  comprobación de root sin tocar nada del sistema.
 
 ### 16.2 systemd
 
@@ -1032,70 +1081,78 @@ Si algo de esta lista se rompe, se rompe el diseño (y probablemente tests):
 
 ## 19. Limitaciones conocidas y deuda técnica
 
-Estado tras el saneamiento v0.2. Lo resuelto se marca como tal; lo abierto sigue abierto.
+Estado tras el saneamiento v0.2 y la iteración de instalación/reset. Lo resuelto se marca
+como tal; lo abierto sigue abierto.
 
 **Resuelto en v0.2**
 
-1. ~~Los puertos UDP del catálogo nunca se escanean~~ → pasada `-sU` acotada con
-   `CAP_NET_RAW`, sólo `open`, `port_risky` también para UDP y nota en `/health` sin raw
-   (§15).
-2. ~~Tres claves de configuración muertas~~ → `quick_timeout`, `quick_periodic_hours` y
-   `weekly_rescan_days` están cableadas, con validación ≥ 1 y los mismos valores por
-   defecto (§11, §15).
+1. ~~Los puertos UDP del catálogo nunca se escanean~~ → pasada `-sU -sV --version-light`
+   acotada con `CAP_NET_RAW`, sólo `open`, `port_risky` también para UDP y nota en `/health`
+   sin raw (§15).
+2. ~~Tres claves de configuración muertas~~ → `quick_timeout`, `quick_periodic_hours`,
+   `weekly_rescan_days` y ahora `udp_timeout` están cableadas y validadas (§11, §15).
 3. ~~En `degraded` el evento quedaba `verified=0` sin bloque `verificacion`~~ → ahora se
    guarda `{"estado": "no_verificable", "motivo": …}` y, si la sonda no obtuvo respuesta,
-   `{"estado": "sin_respuesta"}`; el panel muestra etiquetas distintas en `/events` y en
-   el detalle del equipo. `verified` conserva su significado.
+   `{"estado": "sin_respuesta"}`; el panel muestra etiquetas distintas.
 4. ~~No hay migraciones reales~~ → runner versionado con `PRAGMA user_version`, una
    transacción por migración y copia `<db>.bak-v<N>` previa (§6).
 5. ~~La retención no cubría la cola ni los XML~~ → purga `enviado`/`agotado` (nunca
-   `pendiente`) y los XML de escaneos purgados, con contención de ruta en
-   `paths.scans_dir`.
+   `pendiente`) y los XML de escaneos purgados, con contención de ruta.
 6. ~~Un hilo efímero por verificación ARP~~ → pool fijo de `VERIFY_WORKERS = 4` con cola
    acotada (`VERIFY_QUEUE_MAX = 64`); la alerta nunca se pierde.
-7. ~~Pulido menor~~ → `doctor` imprime el latido como fecha y "hace N s"; se eliminaron el
-   import sin uso de `Config` en `dashboard/app.py` (queda en `TYPE_CHECKING`) y la
-   variable `net` sin uso en `scenarios._arp_sweep`.
-8. ~~`CONTEXT.md` desincronizado sin aviso~~ → lleva cabecera que lo declara histórico y
-   enumera sus desfases; sigue ignorado por git.
+7. ~~`quick` cerraba puertos que no había explorado~~ → sólo `standard` y `vuln` cierran;
+   `quick` abre y actualiza. Un puerto que reaparece tras un cierre real sí genera evento
+   (§15).
+8. ~~No había forma segura de limpiar la base tras sembrar simulaciones~~ → `reset-db`
+   (sólo CLI y root, sensor parado, confirmación escrita, copia previa, `--keep-devices` y
+   `--keep-logs`). No está expuesto en el panel y nunca es automático.
+9. ~~Instalación sólo desde el repositorio y dependiente del directorio actual~~ →
+   `install.sh --system` + `scripts/sync_tree.sh` y resolución de raíz
+   `--root` > `BATRADE_ROOT` > paquete instalado (§16.1).
+10. ~~Pulido menor~~ → `doctor` imprime el latido legible, el usuario efectivo y un bloque
+    «Prueba en VM»; se eliminaron el import sin uso de `Config` y la variable `net`.
+11. ~~`CONTEXT.md` desincronizado sin aviso~~ → lleva cabecera que lo declara histórico.
 
 **Funcionalidad con matices**
 
-9. **`approve_baseline` deja fuera las MAC aleatorias** por diseño; el operador debe
-   revisarlas una a una. El panel lo indica con `pendientes` (C7).
-10. **UDP sólo es verificable con `CAP_NET_RAW`.** En `degraded` no hay pasada UDP: los
-    puertos UDP conocidos se conservan tal cual (no se marcan como cerrados) y la
-    limitación se anuncia en `/health`. Es una limitación de privilegios, no un bug.
-11. **Un escaneo `quick` sólo explora 100 puertos TCP** (`-F`): un puerto descubierto por
-    `standard` fuera de esa lista pasa a `closed` en el siguiente `quick`. Es el
-    comportamiento histórico y no se ha cambiado para no alterar el contrato del diff.
+12. **`approve_baseline` deja fuera las MAC aleatorias** por diseño; el panel lo indica con
+    `pendientes` (C7).
+13. **UDP sólo es verificable con `CAP_NET_RAW`, y sólo es fiable con `-sV`.** Un servicio
+    que ignore las sondas de versión seguirá apareciendo `open|filtered` y, por diseño, no
+    genera evento. La validación real contra un equipo con SSDP/mDNS está pendiente en la VM.
+14. **Un cierre real tarda hasta el siguiente `standard`** (semanal por defecto) en
+    reflejarse: `quick` ya no cierra puertos. Es el precio de no marcar como cerrado lo que
+    no se ha explorado.
+15. **La instalación de sistema no hace `chown` de `var/`.** Si el CLI corre como root
+    sobre un `var/` de otro usuario (p. ej. el del servicio), los archivos nuevos quedan a
+    nombre de root; `doctor` lo advierte. Decisión: no tocar la propiedad automáticamente.
 
 **Cobertura y visibilidad**
 
-12. **Un solo interfaz y solo IPv4.** Sin IPv6 (el watcher netlink ignora no-IPv4), sin
-    multi-interfaz. Fuera de alcance de v0.1/v0.2.
-13. **Wi-Fi en modo managed:** el sniffer solo ve tráfico propio y broadcast/multicast. Es
-    una limitación física; `doctor` y `/health` siguen avisando.
-14. **El barrido no alimenta el motor:** `_sweep_loop` pasa por inventario, no por reglas.
+16. **Un solo interfaz y solo IPv4.** Sin IPv6 ni multi-interfaz. Fuera de alcance.
+17. **Wi-Fi en modo managed:** el sniffer solo ve tráfico propio y broadcast/multicast. Es
+    una limitación física; `doctor` avisa también si la interfaz parece de hipervisor.
+18. **El barrido no alimenta el motor:** `_sweep_loop` pasa por inventario, no por reglas.
 
 **Modelo de datos y mantenimiento**
 
-15. **No se guarda tráfico.** Solo hallazgos y metadatos; no hay retención de `.pcap`.
-16. **Sin API JSON.** El panel devuelve HTML. Para integraciones, `batrade export`.
-17. **Sin `LICENSE`.** Decisión pendiente del propietario; el README remite a él.
-18. **Versión del paquete en `0.1.0`.** La subida a `0.2.0` está pendiente de aprobación
-    explícita aunque el saneamiento ya está aplicado.
+19. **No se guarda tráfico.** Solo hallazgos y metadatos; no hay retención de `.pcap`.
+20. **Sin API JSON.** El panel devuelve HTML. Para integraciones, `batrade export`.
+21. **Sin `LICENSE`.** Decisión pendiente del propietario; el README remite a él.
+22. **Versión del paquete en `0.1.0`.** La subida a `0.2.0` sigue pendiente de aprobación.
 
 **Operación**
 
-19. **Un solo sensor por base de datos.** Dos instancias provocan escrituras conflictivas
-    (mitigado por `busy_timeout`, no resuelto).
-20. **`stop` espera 8 s por componente** y luego SIGKILL; un nmap `vuln` en curso puede
+23. **Un solo sensor por base de datos.** El CLI se niega a arrancar si la unidad systemd
+    está activa, pero dos CLI en máquinas distintas contra la misma base siguen siendo
+    responsabilidad del operador (`busy_timeout` lo mitiga, no lo resuelve).
+24. **`stop` espera 8 s por componente** y luego SIGKILL; un nmap `vuln` en curso puede
     quedar cortado (la fila se marca `interrumpido` al siguiente arranque).
-21. **Sin autenticación por usuario** en el panel: un token compartido y sesión. Suficiente
-    para loopback/LAN doméstica, no para multiusuario.
-22. **`ProtectHome=true`** en las unidades impide ejecutar desde `/home`; el instalador
-    avisa y sugiere `/opt/batrade` o `batrade start/stop`.
+25. **Sin autenticación por usuario** en el panel: un token compartido y sesión.
+26. **`ProtectHome=true`** en las unidades impide ejecutar desde `/home`; tanto el
+    instalador como el README lo avisan y ofrecen `/opt/batrade` o `batrade start/stop`.
+27. **Sin rsync, la reinstalación no poda archivos obsoletos** (`tar` no tiene `--delete`).
+    Funcional, pero un archivo retirado del repo puede quedarse en el prefix.
 
 ---
 
@@ -1207,8 +1264,9 @@ Este proyecto maneja datos de una red doméstica real. Reglas para cualquier age
 **Nunca** copiar a prompts, documentos, commits, issues o capturas:
 
 - Contenido de `.env` (tokens de Telegram, webhook de Discord, token del panel).
-- `var/batrade.db` y sus copias `var/batrade.db.bak-v*` (inventario real: MACs, IPs,
-  hostnames, historial). Las copias de migración son tan sensibles como el original.
+- `var/batrade.db` y sus copias `var/batrade.db.bak-v*` / `var/batrade.db.bak-reset-*`
+  (inventario real: MACs, IPs, hostnames, historial). Las copias son tan sensibles como el
+  original.
 - `var/alerts.log` (eventos con IP/MAC reales).
 - `var/scans/*.xml` (puertos y versiones reales de los equipos).
 - `var/log/*.log` / `*.out` (pueden incluir IPs, MACs y errores internos).
@@ -1271,6 +1329,7 @@ Códigos de salida: `0` OK, `1` error de ejecución (daemon/interfaz) o negativa
 var/
   batrade.db, batrade.db-wal, batrade.db-shm   base SQLite (WAL)
   batrade.db.bak-v<N>[, -2, -3...]             copia previa a migrar (600, nunca se pisa)
+  batrade.db.bak-reset-<epoch_ms>[-2...]       copia previa a reset-db (600, nunca se pisa)
   sensor.pid, dashboard.pid                    PIDs del control por CLI
   alerts.log                                   alertas locales (600)
   scans/scan-<perfil>-<ip>-<epoch>.xml         salida de nmap (700/600)
