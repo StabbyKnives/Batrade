@@ -42,6 +42,11 @@ from batrade.notify import Notifier
 
 log = logging.getLogger("batrade.sensor")
 
+# Sondas ARP simultáneas. Un ataque sostenido puede generar muchos eventos con
+# `needs_verify`; el pool evita la rotación sin límite de hilos efímeros.
+VERIFY_WORKERS = 4
+VERIFY_QUEUE_MAX = 64
+
 
 def safe_unlink_scan(scans_dir: str | Path, candidate: str | Path) -> bool:
     """Elimina un XML de escaneo sólo si está realmente dentro de ``scans_dir``.
@@ -96,6 +101,9 @@ class Sensor:
         self._lock = threading.RLock()
         self._pending: set[tuple[str, str]] = set()
         self.scan_queue: queue.Queue[ScanJob | None] = queue.Queue(maxsize=64)
+        self._verify_queue: queue.Queue[tuple[int, str] | None] = queue.Queue(
+            maxsize=VERIFY_QUEUE_MAX)
+        self._verify_started = False
         self._threads: list[threading.Thread] = []
         self.started_ts = now_ms()
         self.oui = OuiDB.load(cfg.paths.oui_file)
@@ -198,7 +206,7 @@ class Sensor:
             self.scan_queue.put_nowait(None)
         except queue.Full:
             pass
-        for t in self._threads:
+        for t in list(self._threads):
             t.join(timeout=3.0)
         try:
             store.heartbeat(self.conn, "sensor", now_ms(), json.dumps({
@@ -610,9 +618,45 @@ class Sensor:
         return len(out)
 
     def _spawn_verification(self, event_id: int, ip: str) -> None:
-        """Lanza la sonda ARP sin bloquear la alerta (decisión C2)."""
-        threading.Thread(target=self._run_verification, args=(event_id, ip),
-                         name="batrade-verify", daemon=True).start()
+        """Encola la sonda ARP sin bloquear la alerta (decisión C2).
+
+        Un pool fijo de ``VERIFY_WORKERS`` hilos atiende la cola: los eventos
+        siguen guardándose aunque la cola esté llena, y en ese caso sólo se
+        pierde la comprobación (se registra en el log).
+        """
+        self._ensure_verify_pool()
+        try:
+            self._verify_queue.put_nowait((event_id, ip))
+        except queue.Full:
+            log.warning("cola de verificación llena; el evento %s queda sin verificar",
+                        event_id)
+
+    def _ensure_verify_pool(self) -> None:
+        if self._verify_started:
+            return
+        with self._lock:
+            if self._verify_started:
+                return
+            self._verify_started = True
+            for i in range(VERIFY_WORKERS):
+                t = threading.Thread(target=self._verify_worker,
+                                     name=f"batrade-verify-{i}", daemon=True)
+                self._threads.append(t)
+                t.start()
+
+    def _verify_worker(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                item = self._verify_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            event_id, ip = item
+            try:
+                self._run_verification(event_id, ip)
+            except Exception:  # noqa: BLE001 - un fallo no puede tumbar el pool
+                log.exception("verificación ARP falló", extra={"fields": {"evento": event_id}})
 
     def _run_verification(self, event_id: int, ip: str) -> None:
         """Sondea, interpreta y anota el resultado en el evento."""

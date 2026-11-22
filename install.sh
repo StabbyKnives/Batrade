@@ -207,8 +207,11 @@ if ((INSTALL_SYSTEMD)); then
     exit 1
   fi
   if [[ "$ROOT" == /home/* ]]; then
-    echo "  aviso       : ProtectHome=true impide leer $ROOT desde systemd;" >&2
-    echo "                instala el proyecto en /opt/batrade para el servicio" >&2
+    echo "  aviso       : el repositorio está bajo /home y las unidades usan" >&2
+    echo "                ProtectHome=true, así que systemd NO podrá leer $ROOT" >&2
+    echo "                y el servicio fallará al arrancar." >&2
+    echo "                Opciones: mover el proyecto a /opt/batrade (recomendado)" >&2
+    echo "                o no usar systemd: '$PY_BIN -m batrade start' y 'stop'." >&2
   fi
   # Usuario de servicio sin shell (Debian/Kali, Fedora/RHEL, Arch, openSUSE).
   if ! id -u batrade >/dev/null 2>&1; then
